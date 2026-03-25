@@ -1,100 +1,50 @@
 # liteRAG
 
-Cost-efficient Retrieval-Augmented Generation pipeline for large PDF question answering (< ₹1/session)
+A production-ready, cost-efficient RAG system for querying large PDFs.
 
----
+## 🛠️ Tech Stack
 
-## Overview
+- **Backend**: FastAPI, PyMuPDF, FAISS, sentence-transformers, Google GenAI (Gemini-3-Flash).
+- **Frontend**: Vite, React, Lucide React, CSS Variables.
 
-liteRAG enables users to query large PDF documents using natural language while minimizing token usage and computational cost.
+## 🚀 Quick Start
 
-Instead of processing entire documents, the system retrieves only the most relevant context and generates accurate, grounded responses.
+### Backend
 
----
+1. Activate virtual environment:
+   - **PowerShell**: `.\.venv\Scripts\Activate.ps1`
+   - **Bash**: `source .venv/bin/activate`
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. Set your Google API Key:
+   - **PowerShell**: `$env:GOOGLE_API_KEY='your-api-key'`
+   - **Bash**: `export GOOGLE_API_KEY='your-api-key'`
+   - **Alternative**: Create a `.env` file in the `backend` directory with `GOOGLE_API_KEY=your-api-key`.
+3. Run the API:
+   ```bash
+   uvicorn app.main:app --reload
+   ```
 
-## Problem
+### Frontend
 
-Large documents exceed LLM context limits and significantly increase token costs.
+1. Install dependencies:
+   ```bash
+   cd frontend
+   npm install
+   ```
+2. Run the dev server:
+   ```bash
+   npm run dev
+   ```
 
-The goal is to:
+## 🔍 Evaluation
 
-* Maintain high answer accuracy
-* Reduce token consumption
-* Enable scalable querying
-
----
-
-## Solution
-
-liteRAG uses a Retrieval-Augmented Generation (RAG) pipeline:
-
-* Offline document processing and indexing
-* Context-aware retrieval at query time
-* Minimal context passed to the language model
-
----
-
-## Architecture
-
+To run the retrieval validation suite:
+```bash
+python -m backend.tests.run_validation
 ```
-PDF → Text → Chunking → Embeddings → Vector Store
 
-Query → Embedding → Retrieval → Compression → LLM → Response
-```
-
----
-
-## Features
-
-* Efficient PDF ingestion
-* Semantic search using embeddings
-* Context-aware chunking
-* Token-optimized responses
-* Fast local retrieval (FAISS)
-* Modular pipeline
-
----
-
-## Cost Strategy
-
-Designed to operate under ₹1 per session:
-
-* Top-K retrieval
-* Context compression
-* Minimal LLM calls
-* Optional caching
-
----
-
-## Development Phases
-
-1. Local setup (parsing, chunking, embeddings)
-2. Retrieval validation
-3. Answer generation
-4. Optimization (compression, caching)
-5. Evaluation (accuracy, cost)
-
----
-
-## Tech Stack
-
-* Python
-* FAISS
-* Sentence Transformers
-* LLM API
-
----
-
-## Future Work
-
-* Hybrid search
-* Query rewriting
-* Hierarchical retrieval
-* Answer citations
-* Interactive UI
-
----
-
-## Author
-
-Arnab Mistry
+## ⚖️ License
+MIT
