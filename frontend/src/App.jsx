@@ -42,7 +42,66 @@ const highlightRelevantSentences = (text, query) => {
   }).join(' ');
 };
 
-// --- Components ---
+// --- Render Engine & Components ---
+
+const processAnswer = (text) => {
+  const lines = text.split("\n").map(l => l.trim()).filter(l => l);
+  
+  const parsed = {
+    blocks: []
+  };
+  
+  let currentList = [];
+  
+  let highlightCount = 0;
+  const formatContent = (content) => {
+    if (!content) return "";
+    return content
+      .replace(/"(.*?)"/g, (match, p1) => {
+        if (highlightCount < 2 && p1.length > 3) {
+          highlightCount++;
+          return `<span class="concept-highlight">"${p1}"</span>`;
+        }
+        return `"${p1}"`;
+      })
+      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\(Page (\d+)\)/gi, '<span class="source-tag">Page $1</span>')
+      .replace(/\[(\d+)\]/g, '<a href="#source-$1" class="citation-link">[$1]</a>');
+  };
+
+  const flushList = () => {
+    if (currentList.length > 0) {
+      parsed.blocks.push({ type: 'ul', items: currentList });
+      currentList = [];
+    }
+  };
+
+  lines.forEach(line => {
+    const isBullet = line.startsWith('* ') || line.startsWith('- ');
+    const titleMatch = line.match(/^[\*\-]\s+\*\*(.*?)\*\*\s*[:\-]?\s*(.*)/);
+
+    if (titleMatch) {
+      flushList();
+      const title = titleMatch[1];
+      const content = titleMatch[2];
+      
+      parsed.blocks.push({ type: 'h3', content: title });
+      if (content) {
+        parsed.blocks.push({ type: 'p', content: formatContent(content) });
+      }
+    } else if (isBullet) {
+      const content = line.replace(/^[\*\-]\s+/, '');
+      currentList.push(formatContent(content));
+    } else {
+      flushList();
+      parsed.blocks.push({ type: 'p', content: formatContent(line) });
+    }
+  });
+
+  flushList();
+
+  return parsed;
+};
 
 const SourceHighlight = ({ sources, cached, query }) => {
   if (!sources || sources.length === 0) return null;
@@ -154,30 +213,12 @@ const TranscriptItem = ({ message }) => {
     );
   }
 
-  // Parse text for citations [1], [2] and turn them into links
-  const renderTextWithCitations = (text) => {
-    // Splits by [1], [2], etc.
-    const parts = text.split(/(\[\d+\])/g);
-    return parts.map((part, i) => {
-      const match = part.match(/\[(\d+)\]/);
-      if (match) {
-        const id = match[1];
-        return (
-          <a key={i} href={`#source-${id}`} style={{
-            color: 'var(--accent)',
-            textDecoration: 'none',
-            fontSize: '0.75em',
-            verticalAlign: 'super',
-            cursor: 'pointer',
-            padding: '0 0.1em'
-          }} title={`Jump to Source Rank ${id}`}>
-            {part}
-          </a>
-        );
-      }
-      return <span key={i}>{part}</span>;
-    });
-  };
+  const parsed = useMemo(() => {
+    if (message.role === 'assistant' && !message.isFailure) {
+      return processAnswer(message.text);
+    }
+    return null;
+  }, [message]);
 
   return (
     <div className="animate-slide-up" style={{ marginBottom: '4rem', marginLeft: '2rem' }}>
@@ -191,9 +232,21 @@ const TranscriptItem = ({ message }) => {
         </div>
       ) : (
         <div className="answer-content reading-measure">
-          {message.text.split('\n').filter(p => p.trim() !== '').map((paragraph, idx) => (
-            <p key={idx}>{renderTextWithCitations(paragraph)}</p>
-          ))}
+          {parsed && parsed.blocks.map((block, i) => {
+            if (block.type === 'h3') {
+              return <h3 key={i} style={{ fontSize: '1.35rem', marginTop: '2.5rem', marginBottom: '1rem', color: 'var(--text-primary)', fontWeight: 600 }}>{block.content}</h3>;
+            }
+            if (block.type === 'ul') {
+              return (
+                <ul key={i} style={{ paddingLeft: '1.5rem', marginBottom: '1.5rem', color: 'var(--text-primary)', lineHeight: 1.8 }}>
+                  {block.items.map((item, j) => (
+                    <li key={j} style={{ marginBottom: '0.5rem' }} dangerouslySetInnerHTML={{ __html: item }} />
+                  ))}
+                </ul>
+              );
+            }
+            return <p key={i} style={{ marginBottom: '1.5rem', lineHeight: 1.8 }} dangerouslySetInnerHTML={{ __html: block.content }} />;
+          })}
         </div>
       )}
 

@@ -201,6 +201,40 @@ p {
   font-weight: 500;
 }
 
+.concept-highlight {
+  background: var(--accent-softer);
+  color: var(--accent);
+  padding: 0 4px;
+  border-radius: 2px;
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+
+.source-tag {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  font-size: 0.75em;
+  font-family: var(--font-mono);
+  vertical-align: middle;
+  cursor: default;
+}
+
+.citation-link {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 0.75em;
+  vertical-align: super;
+  cursor: pointer;
+  padding: 0 0.1em;
+}
+
+.citation-link:hover {
+  text-decoration: underline;
+}
+
 /* Dropzone */
 .file-dropzone {
   border: 1px dashed var(--border);
