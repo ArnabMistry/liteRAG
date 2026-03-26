@@ -1,15 +1,20 @@
 {
   "version": 1,
   "skills": {
+    "3d-web-experience": {
+      "source": "sickn33/antigravity-awesome-skills",
+      "sourceType": "github",
+      "computedHash": "18b4f9dca7aa13d0f65938ed926c7865d635d74c58ea60291e313722f1d3a9dd"
+    },
     "find-skills": {
       "source": "vercel-labs/skills",
       "sourceType": "github",
       "computedHash": "645b891da1edbae76ab79c7b088d4e73397464f8396edaf773c0e01971ce75d6"
     },
     "frontend-design": {
-      "source": "anthropics/skills",
+      "source": "sickn33/antigravity-awesome-skills",
       "sourceType": "github",
-      "computedHash": "516bd2154eb843a8240e43d5b285229129853114ad7075a5e141e1c08e408c84"
+      "computedHash": "f94901119d00bce26b5057e2f5f9aa6f8ac9099109ad328a827a0e22af107739"
     },
     "gemini-interactions-api": {
       "source": "google-gemini/gemini-skills",

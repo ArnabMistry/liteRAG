@@ -83,17 +83,61 @@ async def query_document(request: QueryRequest):
     # 1. Check Cache
     cached_response = cache.get(query)
     if cached_response:
-        print(f"Cache hit for query: {query}")
+        print(f"Cache hit -> skipping LLM")
         return {"answer": cached_response, "cached": True}
     
     # 2. Retrieve
     query_emb = embedding_engine.generate_single_embedding(query)
-    retrieved_chunks = vector_store.search(query_emb, k=5, threshold=0.1) # Threshold 0.1 for test
+    retrieved_chunks = vector_store.search(query_emb, k=3, threshold=0.1) # Reduced k to 3 for precision
+    print(f"Chunks retrieved: {len(retrieved_chunks)}")
     
-    # 3. Optimize Context
-    context = optimizer.optimize_context(retrieved_chunks)
+    if not retrieved_chunks:
+        print("No relevant context -> skipping LLM")
+        return {
+            "answer": "I don't know the answer to this as the document does not contain relevant context.",
+            "sources": [],
+            "cached": False
+        }
     
-    # 4. Generate Answer
+    # 3. Simple Query Fast-Path (No-LLM Mode)
+    simple_prefixes = ("what is ", "what are ", "define ", "who is ", "explain ")
+    is_simple_query = any(query.lower().startswith(p) for p in simple_prefixes) and len(query.split()) < 8
+
+    if is_simple_query:
+        print(f"Simple query '{query}' -> returning top chunk directly, skipping LLM")
+        top_chunk_text = retrieved_chunks[0].get("text", "")
+        # Minimal cleaning
+        direct_answer = f"(Direct Extract) {top_chunk_text}"
+        
+        # 5. Cache & Return directly
+        cache.set(query, direct_answer)
+        return {
+            "answer": direct_answer,
+            "sources": [{
+                "text": c.get("text", ""),
+                "score": c.get("score", 0.0),
+                "rank": c.get("rank", i + 1),
+                **c.get("metadata", {})
+            } for i, c in enumerate(retrieved_chunks)],
+            "cached": False
+        }
+
+    # 4. Optimize Context
+    context = optimizer.optimize_context(query, retrieved_chunks)
+    
+    if not context or len(context.strip()) < 10:
+        print("No relevant context -> skipping LLM")
+        return {
+            "answer": "I don't know the answer to this as the document does not contain relevant context.",
+            "sources": [],
+            "cached": False
+        }
+        
+    final_context_size = len(context) // 4
+    print(f"Final context size: ~{final_context_size} tokens")
+    
+    # 5. Generate Answer
+    print("Calling LLM")
     answer = generator.generate_answer(query, context)
     
     # 5. Cache & Return
@@ -101,7 +145,12 @@ async def query_document(request: QueryRequest):
     
     return {
         "answer": answer,
-        "sources": [c["metadata"] for c in retrieved_chunks],
+        "sources": [{
+            "text": c.get("text", ""),
+            "score": c.get("score", 0.0),
+            "rank": c.get("rank", i + 1),
+            **c.get("metadata", {})
+        } for i, c in enumerate(retrieved_chunks)],
         "cached": False
     }
 

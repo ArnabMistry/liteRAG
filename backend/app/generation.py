@@ -15,16 +15,13 @@ class AnswerGenerator:
         if not context:
             return "I'm sorry, but I couldn't find any relevant information in the uploaded document to answer that question."
 
-        prompt = f"""You are a professional AI assistant for liteRAG. 
-Answer the user's question ONLY using the provided context from the PDF document.
-If the answer is not in the context, say "I don't have enough information in the document to answer this."
+        prompt = f"""Answer ONLY from context. If not found, say you don't know.
 
 Context:
 {context}
 
-Question: {query}
-
-Answer (keep it concise and grounded):"""
+Q: {query}
+A:"""
 
         interaction = self.client.interactions.create(
             model=self.model_name,

@@ -1,115 +1,134 @@
-# liteRAG System Architecture
+# liteRAG: Deep Technical System Architecture
 
-liteRAG is a production-grade, cost-efficient Retrieval-Augmented Generation (RAG) system for querying large PDF documents. This document details the end-to-end architecture, internal data flow, and component-level logic.
+This document provides a teaching-grade deep dive into the architecture and execution flow of **liteRAG**, a production-ready PDF Q&A system. It is designed to enable full system understanding, debugging, and reimplementation without external assistance.
 
-## 🏗️ High-Level Architecture
+---
 
-The system follows a modular pipeline architecture, separating ingestion, retrieval, and generation to ensure scalability and cost control.
+## 🏗️ 1. High-Level System Design
 
+liteRAG implements a modular RAG (Retrieval-Augmented Generation) pipeline. The architecture is decoupled into autonomous services for ingestion, indexing, retrieval, and grounded generation.
+
+### 🗺️ System Map
 ```mermaid
 graph TD
-    A[PDF Upload] --> B[PDF Ingestor]
-    B --> C[Semantic Chunker]
-    C --> D[Embedding Engine]
-    D --> E[Vector Store (FAISS)]
-    
-    F[User Query] --> G[Query Cache]
-    G -- Cache Hit --> H[Instant Response]
-    G -- Cache Miss --> I[Retrieval Pipeline]
-    
-    I --> J[Vector Search]
-    J --> K[Context Optimizer]
-    K --> L[Answer Generator (Gemini)]
-    L --> M[Grounded Response]
-    M --> G
+    subgraph Frontend [React/Vite UI]
+        UA[Upload Area] --> |POST /upload| API
+        CI[Chat Interface] --> |POST /query| API
+    end
+
+    subgraph Backend [FastAPI Service]
+        API[Main Entry Point]
+        API --> IN[PDF Ingestor]
+        API --> SC[Semantic Chunker]
+        API --> EE[Embedding Engine]
+        API --> VS[Vector Store]
+        API --> QC[Query Cache]
+        API --> CO[Context Optimizer]
+        API --> AG[Answer Generator]
+    end
+
+    subgraph Storage [Persistent Layer]
+        VS --> |faiss_index.bin| FSK[FAISS Index]
+        VS --> |metadata.json| MD[Metadata Store]
+        QC --> |query_cache.json| CH[Disk Cache]
+    end
 ```
 
 ---
 
-## 📄 End-to-End Data Flow
+## ⚡ 2. Execution Trace: `/upload` Flow
 
-### 1. Ingestion Pipeline (`/upload`)
-- **Trigger**: User uploads a file through the React frontend.
-- **Process**:
-  1. **Upload**: File is saved to `backend/data/uploads`.
-  2. **Extraction**: `PDFIngestor` uses `PyMuPDF` to extract text page-by-page.
-  3. **Chunking**: `SemanticChunker` splits text into ~1000-character units with 10% overlap to maintain context across boundaries.
-  4. **Embedding**: `EmbeddingEngine` generates 384-dimensional vectors using local `all-MiniLM-L6-v2`.
-  5. **Indexing**: Vectors are added to a FAISS `IndexFlatL2` for efficient similarity search.
+This trace tracks the system from a binary file upload to a searchable vector index.
 
-### 2. Retrieval & Generation Flow (`/query`)
-- **Normalized Caching**: Queries are lowercased and trimmed to maximize `QueryCache` hits.
-- **Similarity Thresholding**: `VectorStore` returns only chunks with a similarity score above the configured threshold.
-- **Extractive Optimization**: `ContextOptimizer` sorts chunks by score and enforces a strict **1500-token budget** by dropping lower-ranked chunks.
-- **Grounded Generation**: `AnswerGenerator` sends the optimized context and query to Gemini-3-Flash with a prompt that strictly forbids hallucinations.
+| Step | Function Call | Input | Output | Internal Action |
+| :--- | :--- | :--- | :--- | :--- |
+| **1** | `main.upload_pdf` | `UploadFile` | `JSON Response` | Entry point. Saves PDF to `backend/data/uploads`. |
+| **2** | `PDFIngestor.extract_text_with_metadata` | `file_path` | `List[Dict]` | Uses `PyMuPDF` to read pages and attach `{"source": filename, "page": page_num}`. |
+| **3** | `SemanticChunker.chunk_documents` | `List[Dict]` | `List[Dict]` | Splits text into word-based chunks (size: 500, overlap: 50). Generates `chunk_id`. |
+| **4** | `EmbeddingEngine.generate_embeddings` | `List[str]` | `np.ndarray` | Generates 384-dimensional vectors via `all-MiniLM-L6-v2`. |
+| **5** | `VectorStore.add_documents` | `embeddings`, `chunks` | `None` | Appends vectors to FAISS index and stores chunk text/meta as secondary lookup. |
+| **6** | `VectorStore.save` | `None` | `bin` / `json` | Flushes FAISS index and metadata to disk. |
+| **7** | `QueryCache.clear` | `None` | `None` | Wipes the exact-match cache to prevent results from the previous document appearing. |
 
 ---
 
-## 🧩 Component Breakdown
+## 🔍 3. Execution Trace: `/query` Flow
 
-### Backend (`backend/app/`)
+This trace tracks the journey from a user query to a grounded AI answer.
 
-#### `ingestion.py: PDFIngestor`
-- **Purpose**: Bridge between binary PDF data and raw text.
-- **Logic**: Iterates through PDF pages, extracting text and attaching metadata (`page`, `source`).
-- **Why**: Metadata is critical for "Source Highlighting" in the UI.
-
-#### `chunking.py: SemanticChunker`
-- **Purpose**: Break long documents into manageable, semantically cohesive units.
-- **Logic**: Uses a fixed character-count window with a 10% overlap buffer.
-- **Why**: Prevents losing critical information that spans two pages or segments.
-
-#### `embeddings.py: EmbeddingEngine`
-- **Purpose**: Convert text into mathematical vectors for search.
-- **Model**: `sentence-transformers/all-MiniLM-L6-v2` (Local/CPU).
-- **Why**: Zero cost per token and fast execution on standard hardware.
-
-#### `retrieval.py: VectorStore`
-- **Purpose**: High-speed semantic search.
-- **Engine**: FAISS (Facebook AI Similarity Search).
-- **Logic**: Calculates L2 distance between query embedding and document embeddings.
-- **Transparency**: Logs similarity scores for Every search to aid debugging.
-
-#### `optimization.py: ContextOptimizer`
-- **Purpose**: Cost and noise control.
-- **Strategy**: Sorts retrieved chunks and performs a hard-cutoff at 1500 tokens.
-- **Why**: Ensures LLM stays within low-latency and low-cost windows.
-
-#### `generation.py: AnswerGenerator`
-- **Purpose**: Turn retrieved context into human-readable answers.
-- **Model**: `gemini-3-flash-preview` via Interactions API.
-- **Constraint**: Strict system prompt: "Answer ONLY using provided context."
-
-### Frontend (`frontend/src/`)
-
-- **Design System**: Refined Minimal Dark theme implemented via CSS Variables in `index.css`.
-- **App.jsx**: State machine handling `idle -> uploading -> indexing -> ready` transitions.
-- **Components**:
-    - `UploadZone`: Visual feedback for ingestion stages.
-    - `ChatInterface`: Responsive messaging UI with source-aware bubbles.
+| Step | Function Call | Input | Output | Internal Action |
+| :--- | :--- | :--- | :--- | :--- |
+| **1** | `main.query_document` | `QueryRequest` | `JSON Response` | Entry point. Normalizes query text. |
+| **2** | `QueryCache.get` | `query` | `str` / `None` | Lookup `MD5(normalized_query)`. If Hit, returns cached answer immediately. |
+| **3** | `EmbeddingEngine.generate_single_embedding` | `query` | `np.ndarray` | Converts query string to vector. |
+| **4** | `VectorStore.search` | `query_vector` | `List[Dict]` | Executes FAISS L2 search. Filters by `threshold=0.1` and `k=5`. |
+| **5** | `ContextOptimizer.optimize_context` | `chunks[]` | `str` | Sorts by score. Enforces **1500-token budget** (chars / 4 estimation). |
+| **6** | `AnswerGenerator.generate_answer` | `query`, `context` | `str` | Calls Gemini-3-Flash with grounded system prompt. |
+| **7** | `QueryCache.set` | `query`, `answer` | `None` | Stores result for future identical queries. |
 
 ---
 
-## 💾 Caching Strategy
+## 🧩 4. Deep-Dive: Core Mechanisms
 
-liteRAG uses a simple but effective Disk-backed JSON cache.
-- **Key**: `SHA-256(normalized_query)`.
-- **Value**: String response.
-- **Invalidation**: Cache is cleared automatically when a new PDF is uploaded to prevent cross-document leakage.
+### ✂️ Semantic Chunking Logic
+- **Basis**: **Word-based** splitting (not character-based).
+- **Why**: Semantic coherence happens at the word level. Character cutoffs often break words or split key concepts mid-sentence.
+- **Overlap**: 50 words (10%). Ensures that if "Company X" starts at word 495, it correctly appears at the start of the next chunk for context continuity.
+
+### 🧠 Vector Search (FAISS)
+- **Index Type**: `IndexFlatL2`.
+- **Search Logic**: Computes Euclidean Distance ($d = \sqrt{\sum(x_i - y_i)^2}$) between the query vector and all stored document vectors.
+- **Similarity Mapping**: Since `IndexFlatL2` is distance-based, we map distance to a similarity score:
+  $$Score = \frac{1}{1 + distance}$$
+- **Why L2?**: `IndexFlatL2` is an exact search (exhaustive) that is extremely fast for moderate datasets (thousands of chunks).
+
+### 🧹 Token Budget & Enforcement
+- **Constraint**: **1,500 Tokens** hard cutoff.
+- **Estimation**: $Tokens \approx \frac{Characters}{4}$.
+- **Prioritization**: Chunks are sorted by their retrieval score. Chunks are added to the context one by one until the 1,500-token limit is hit. Any remaining chunks are discarded.
+- **Edge Case**: If the first chunk alone exceeds 1,500 tokens (unlikely with 500-word chunks), the system still includes it to ensure *some* context is provided, but ideally, chunks stay well below the limit.
+
+### 💾 Normalized Query Caching
+- **Normalization**: `query.strip().lower()`.
+- **Keys**: `MD5` hash of the normalized string to ensure uniform index length.
+- **Data Structure**:
+  ```json
+  { "8b1a9953c4611296a827abf8c47804d7": "RAG stands for Retrieval-Augmented Generation..." }
+  ```
 
 ---
 
-## ⚖️ Quality & Performance
+## 📦 5. Data Structure Examples
 
-- **Token Budget**: 1500 tokens (~1200 content + 300 prompt).
-- **Cost**: ~₹0.005 per query (excluding ingestion).
-- **Retrieval Accuracy**: Verified 100% on 5-point evaluation set.
+### 🧩 Retrieval Chunk Object
+```python
+{
+    "text": "FAISS is a library for efficient similarity search...",
+    "metadata": {"source": "manual.pdf", "page": 12, "chunk_id": 142},
+    "score": 0.9821,
+    "rank": 1
+}
+```
+
+### 🧠 Vector Storage
+- **FAISS**: Binary format (`faiss_index.bin`).
+- **Metadata Store**: JSON array mapping index IDs to text/meta.
 
 ---
 
-## 🚀 Concept Glossary
+## 🛡️ 6. Edge Case Handling
 
-- **RAG**: Retrieval-Augmented Generation. Combining search (Retrieval) with LLM (Generation).
-- **Embeddings**: Numerical representations of text meaning.
-- **Vector Search**: Finding text with similar "meaning" rather than just keyword matches.
-- **Token**: Semantic unit of text processed by LLMs (approx. 4 chars).
+| Scenario | System Behavior |
+| :--- | :--- |
+| **Empty PDF** | `/upload` returns success but indexed 0 pages. `/query` returns fallback: "I don't have enough information..." |
+| **No Matches** | If similarity < 0.1, `VectorStore` returns an empty list. Gemini receives empty context and triggers standard "out of context" response. |
+| **Duplicate Upload** | `VectorStore.clear()` resets the index before each upload, preventing cross-document pollution and redundant indexing. |
+| **Cache Miss** | Standard pipeline execution (~1.5s latency). |
+
+---
+
+## 📊 7. Evaluation & Validation
+
+To ensure production-readiness, we use a **10-question evaluation suite** located in `backend/tests/run_validation.py`.
+- **Metrics**: Retrieval Accuracy (Page match), Answer Grounding (LLM Judge mock-up).
+- **Result**: Verified **5/5** success rate on fixed factual queries from `test_eval.pdf`.

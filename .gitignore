@@ -20,7 +20,8 @@ backend/data/*.pdf
 backend/data/*.bin
 backend/data/*.json
 !backend/data/README.md
-
+backend/backend/data/*
+!backend/backend/data/.gitkeep
 # OS / Editor
 .DS_Store
 Thumbs.db
