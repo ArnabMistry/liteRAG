@@ -264,6 +264,23 @@ function App() {
   const [status, setStatus] = useState('idle'); // idle, uploading, ready
   const [uploadStages, setUploadStages] = useState([]);
   const [messages, setMessages] = useState([]);
+  const [isDragging, setIsDragging] = useState(false);
+  
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    setIsDragging(false);
+  };
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setIsDragging(false);
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      handleUpload({ target: { files: [e.dataTransfer.files[0]] } });
+    }
+  };
   const [query, setQuery] = useState('');
   const [isQuerying, setIsQuerying] = useState(false);
   
@@ -287,14 +304,14 @@ function App() {
     setUploadStages([]);
     
     // UI Simulation for UX Feedback
-    addUploadStage('Initializing upload...', true, false);
+    addUploadStage('Extracting...', true, false);
 
     const formData = new FormData();
     formData.append('file', uploadedFile);
 
     try {
-      setTimeout(() => addUploadStage('Initializing upload...', false, true), 300);
-      setTimeout(() => addUploadStage('Extracting text context...', true, false), 400);
+      setTimeout(() => addUploadStage('Extracting...', false, true), 300);
+      setTimeout(() => addUploadStage('Chunking...', true, false), 400);
       
       const response = await fetch(`${API_BASE}/upload`, {
         method: 'POST',
@@ -304,14 +321,15 @@ function App() {
       if (!response.ok) throw new Error('Upload failed');
       const data = await response.json();
       
-      addUploadStage('Extracting text context...', false, true);
-      addUploadStage(`Chunking & Embedding (${data.pages || '?'} pages)...`, false, true);
-      addUploadStage('Indexing vectors...', false, true);
+      addUploadStage('Chunking...', false, true);
+      addUploadStage('Embedding...', false, true);
+      addUploadStage('Indexing...', true, false);
       
       setTimeout(() => {
+        addUploadStage('Indexing...', false, true);
         setSession({ id: data.file_id || Date.now(), documentName: uploadedFile.name });
         setStatus('ready');
-      }, 800);
+      }, 500);
       
     } catch (err) {
       console.error(err);
@@ -412,23 +430,38 @@ function App() {
 
       {/* Upload State */}
       {(status === 'idle' || status === 'uploading') && (
-        <div className={`file-dropzone animate-fade-in ${status === 'uploading' ? 'pulse-border' : ''}`} style={{ padding: '4rem 3rem', borderRadius: 'var(--radius-sm)' }}>
-          <input type="file" id="pdf-upload" accept=".pdf" onChange={handleUpload} style={{ display: 'none' }} disabled={status === 'uploading'} />
-          
-          <label htmlFor="pdf-upload" style={{ cursor: status === 'uploading' ? 'default' : 'pointer', display: 'block' }}>
-            {status === 'idle' ? (
-              <div style={{ textAlign: 'center' }}>
-                <div style={{ marginBottom: '1.5rem', opacity: 0.8 }}>
-                  <FileText size={48} strokeWidth={1} color="var(--text-primary)" />
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: '100%' }}>
+          <div 
+            className={`file-dropzone animate-fade-in ${status === 'uploading' ? 'pulse-border' : ''} ${isDragging ? 'dragging' : ''}`} 
+            style={{ 
+              padding: '4rem 3rem', 
+              borderRadius: 'var(--radius-sm)',
+              width: '100%',
+              maxWidth: '600px',
+              borderColor: isDragging ? 'var(--accent)' : ''
+            }}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+          >
+            <input type="file" id="pdf-upload" accept=".pdf" onChange={handleUpload} style={{ display: 'none' }} disabled={status === 'uploading'} />
+            
+            <label htmlFor="pdf-upload" style={{ cursor: status === 'uploading' ? 'default' : 'pointer', display: 'block', width: '100%', margin: 0 }}>
+              {status === 'idle' ? (
+                <div style={{ textAlign: 'center' }}>
+                  <div style={{ marginBottom: '1.5rem', opacity: isDragging ? 1 : 0.8, color: isDragging ? 'var(--accent)' : 'var(--text-primary)', transition: 'all 0.2s ease' }}>
+                    <Upload size={48} strokeWidth={1.5} color="currentColor" />
+                  </div>
+                  <h2 style={{ marginBottom: '1rem', color: isDragging ? 'var(--accent)' : 'var(--text-primary)', transition: 'color 0.2s ease' }}>
+                    {isDragging ? 'Drop your PDF here' : 'Upload PDF'}
+                  </h2>
+                  <p style={{ color: 'var(--text-secondary)', maxWidth: '400px', margin: '0 auto', fontFamily: 'var(--font-body)', lineHeight: 1.6 }}>
+                    Transform complex documents into structured synthesis through privacy-first semantic search and contextual reasoning.
+                  </p>
+                  <div style={{ marginTop: '2.5rem' }}>
+                    <span className="btn-primary">Select PDF to Analyze</span>
+                  </div>
                 </div>
-                <h2 style={{ marginBottom: '1rem' }}>Ingest Knowledge Base</h2>
-                <p style={{ color: 'var(--text-secondary)', maxWidth: '400px', margin: '0 auto', fontFamily: 'var(--font-body)' }}>
-                  Upload a PDF document. The system will extract, chunk, and embed the contents into the local vector space for immediate retrieval.
-                </p>
-                <div style={{ marginTop: '2rem' }}>
-                  <span className="btn-primary">Select Document</span>
-                </div>
-              </div>
             ) : (
               <div style={{ maxWidth: '400px', margin: '0 auto' }}>
                 <h2 style={{ marginBottom: '2rem', textAlign: 'center' }}>Processing...</h2>
@@ -455,7 +488,31 @@ function App() {
             )}
           </label>
         </div>
-      )}
+
+        {status === 'idle' && (
+          <div className="animate-fade-in" style={{ marginTop: '4rem', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '2rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', color: 'var(--text-muted)', fontSize: '0.8rem', fontFamily: 'var(--font-mono)', letterSpacing: '0.05em' }}>
+              <span>EXTRACT</span>
+              <ChevronRight size={14} opacity={0.4} />
+              <span>CHUNK</span>
+              <ChevronRight size={14} opacity={0.4} />
+              <span>EMBED</span>
+              <ChevronRight size={14} opacity={0.4} />
+              <span>QUERY</span>
+            </div>
+            
+            <div style={{ display: 'flex', alignItems: 'center', gap: '2rem', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+              <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <CheckCircle2 size={16} color="var(--success)" /> Processed locally
+              </span>
+              <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <CheckCircle2 size={16} color="var(--success)" /> No external storage
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
+    )}
 
       {/* Research Transcript State */}
       {status === 'ready' && (
