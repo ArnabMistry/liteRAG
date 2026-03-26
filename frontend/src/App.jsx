@@ -1,14 +1,54 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Upload, FileText, Loader2, Send, ChevronRight, ChevronDown, CheckCircle2, AlertCircle, BookOpen, Clock } from 'lucide-react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { Upload, FileText, Loader2, Send, ChevronRight, ChevronDown, CheckCircle2, AlertCircle, BookOpen, Clock, Zap, FileSearch } from 'lucide-react';
 
 const API_BASE = "http://localhost:8000";
 
+// --- Helpers ---
+const getConfidenceColor = (score) => {
+  if (score > 0.65) return 'var(--success)';
+  if (score > 0.45) return 'var(--warning)';
+  return 'var(--error)';
+};
+
+const getConfidenceText = (score) => {
+  if (score > 0.65) return 'High Match';
+  if (score > 0.45) return 'Partial Match';
+  return 'Marginal Match';
+};
+
+const highlightRelevantSentences = (text, query) => {
+  if (!text || !query) return text;
+  
+  const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length > 3);
+  if (queryWords.length === 0) return text;
+
+  // Simple contextual highlighter: highlight sentences containing strong query matches
+  const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
+  
+  return sentences.map((sentence, idx) => {
+    const sLower = sentence.toLowerCase();
+    const hasMatch = queryWords.some(w => sLower.includes(w));
+    
+    if (hasMatch) {
+      // Bold the specific matching words within the sentence
+      let highlightedSentence = sentence;
+      queryWords.forEach(word => {
+        const regex = new RegExp(`(${word})`, 'gi');
+        highlightedSentence = highlightedSentence.replace(regex, '<span style="color: var(--accent); font-weight: 500;">$1</span>');
+      });
+      return `<mark style="background: var(--accent-softer); color: var(--text-primary); border-radius: 2px;">${highlightedSentence}</mark>`;
+    }
+    return `<span style="opacity: 0.7">${sentence}</span>`;
+  }).join(' ');
+};
+
 // --- Components ---
 
-const SourceHighlight = ({ sources, cached }) => {
+const SourceHighlight = ({ sources, cached, query }) => {
   if (!sources || sources.length === 0) return null;
 
   const [expanded, setExpanded] = useState(false);
+  const uniquePages = new Set(sources.map(s => s.page));
 
   return (
     <div className="source-highlight animate-fade-in" style={{ marginTop: '2rem', borderTop: '1px solid var(--border)', paddingTop: '1.5rem' }}>
@@ -16,23 +56,15 @@ const SourceHighlight = ({ sources, cached }) => {
         style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', userSelect: 'none' }}
         onClick={() => setExpanded(!expanded)}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-          <h3 style={{ fontSize: '0.875rem', fontFamily: 'var(--font-mono)', letterSpacing: '0.05em', textTransform: 'uppercase', color: 'var(--text-secondary)' }}>
-            Supporting Context
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+          <h3 style={{ fontSize: '0.875rem', fontFamily: 'var(--font-mono)', letterSpacing: '0.05em', textTransform: 'uppercase', color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <FileSearch size={14} /> Reasoning Context
           </h3>
-          <span style={{ background: 'var(--bg-tertiary)', padding: '0.1rem 0.5rem', borderRadius: 'var(--radius-sm)', fontSize: '0.75rem', color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>
-            {sources.length} {sources.length === 1 ? 'Source' : 'Sources'}
+          <span style={{ borderLeft: '1px solid var(--border)', paddingLeft: '1rem', display: 'flex', gap: '1rem' }}>
+            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+              Synthesized from <strong style={{color: 'var(--text-primary)'}}>{sources.length} chunks</strong> across <strong style={{color: 'var(--text-primary)'}}>{uniquePages.size} pages</strong>
+            </span>
           </span>
-          {cached && (
-            <span style={{ display: 'flex', alignItems: 'center', gap: '0.25rem', color: 'var(--success)', fontSize: '0.75rem', fontFamily: 'var(--font-mono)' }}>
-              <CheckCircle2 size={12} /> Cached (High Confidence)
-            </span>
-          )}
-          {!cached && (
-            <span style={{ display: 'flex', alignItems: 'center', gap: '0.25rem', color: 'var(--warning)', fontSize: '0.75rem', fontFamily: 'var(--font-mono)' }}>
-              <CheckCircle2 size={12} /> Standard Confidence
-            </span>
-          )}
         </div>
         <div>
           {expanded ? <ChevronDown size={18} color="var(--text-muted)" /> : <ChevronRight size={18} color="var(--text-muted)" />}
@@ -41,45 +73,66 @@ const SourceHighlight = ({ sources, cached }) => {
 
       {expanded && (
         <div style={{ marginTop: '1.5rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-          {sources.map((source, idx) => (
-            <div key={idx} style={{ 
-              background: 'var(--bg-secondary)', 
-              borderLeft: '2px solid var(--accent)',
-              padding: '1rem',
-              borderRadius: '0 var(--radius-sm) var(--radius-sm) 0'
-            }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.75rem' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.75rem', color: 'var(--accent)', fontWeight: 500 }}>
-                    [RANK {source.rank || (idx + 1).toString().padStart(2, '0')}]
-                  </span>
-                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                    PAGE {source.page}
-                  </span>
-                  {source.score !== undefined && (
-                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.75rem', color: 'var(--warning)' }}>
-                      SCORE: {(source.score).toFixed(3)}
+          {sources.map((source, idx) => {
+            const isRank1 = source.rank === 1 || idx === 0;
+            const confColor = getConfidenceColor(source.score);
+            const confText = getConfidenceText(source.score);
+            
+            return (
+              <div id={`source-${source.rank || idx + 1}`} key={idx} style={{ 
+                background: isRank1 ? 'var(--bg-tertiary)' : 'var(--bg-secondary)', 
+                borderLeft: `${isRank1 ? '4px' : '2px'} solid ${isRank1 ? 'var(--accent)' : 'var(--border)'}`,
+                padding: '1.25rem',
+                borderRadius: '0 var(--radius-sm) var(--radius-sm) 0',
+                opacity: isRank1 ? 1 : 0.85,
+                transition: 'opacity 0.2s ease',
+              }}
+              onMouseEnter={(e) => e.currentTarget.style.opacity = '1'}
+              onMouseLeave={(e) => e.currentTarget.style.opacity = isRank1 ? '1' : '0.85'}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                    <span style={{ 
+                      fontFamily: 'var(--font-mono)', 
+                      fontSize: '0.75rem', 
+                      color: isRank1 ? 'var(--accent)' : 'var(--text-secondary)', 
+                      fontWeight: isRank1 ? 700 : 500,
+                      background: isRank1 ? 'var(--accent-soft)' : 'transparent',
+                      padding: isRank1 ? '0.1rem 0.5rem' : '0',
+                      borderRadius: '2px'
+                    }}>
+                      [RANK {source.rank || (idx + 1).toString().padStart(2, '0')}]
                     </span>
-                  )}
+                    <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
+                      PAGE {source.page}
+                    </span>
+                    {source.score !== undefined && (
+                      <span style={{ 
+                        fontFamily: 'var(--font-mono)', 
+                        fontSize: '0.7rem', 
+                        color: confColor,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '0.25rem'
+                      }}>
+                        <Zap size={10} /> {confText} {(source.score).toFixed(2)}
+                      </span>
+                    )}
+                  </div>
                 </div>
-                {source.chunk_id && (
-                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: '0.65rem', color: 'var(--text-muted)' }}>
-                    CHUNK_ID: {source.chunk_id}
-                  </span>
-                )}
+                
+                <details open={isRank1} style={{ fontFamily: 'var(--font-body)', fontSize: '0.875rem', color: 'var(--text-primary)', lineHeight: 1.6 }}>
+                  <summary style={{ cursor: 'pointer', outline: 'none', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>
+                    <span style={{ fontStyle: 'italic' }}>Relevant excerpt</span>
+                  </summary>
+                  <div 
+                    style={{ padding: '1rem', background: 'var(--bg-secondary)', borderRadius: 'var(--radius-sm)', marginTop: '0.5rem', whiteSpace: 'pre-wrap', border: '1px solid var(--border)' }}
+                    dangerouslySetInnerHTML={{ __html: highlightRelevantSentences(source.text, query) || "Backend payload missing text extract." }}
+                  />
+                </details>
               </div>
-              <details style={{ fontFamily: 'var(--font-body)', fontSize: '0.875rem', color: 'var(--text-primary)', opacity: 0.9, lineHeight: 1.6 }}>
-                <summary style={{ cursor: 'pointer', outline: 'none', color: 'var(--text-muted)', marginBottom: '0.25rem' }}>
-                  <span style={{ fontStyle: 'italic' }}>Preview:</span>
-                  {' '}
-                  {source.text ? source.text.substring(0, 100) + '...' : ''}
-                </summary>
-                <div style={{ padding: '1rem', background: 'var(--bg-tertiary)', borderRadius: 'var(--radius-sm)', marginTop: '0.75rem', whiteSpace: 'pre-wrap', fontFamily: 'var(--font-body)' }}>
-                  {source.text || "Backend payload missing text extract."}
-                </div>
-              </details>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
@@ -101,16 +154,51 @@ const TranscriptItem = ({ message }) => {
     );
   }
 
+  // Parse text for citations [1], [2] and turn them into links
+  const renderTextWithCitations = (text) => {
+    // Splits by [1], [2], etc.
+    const parts = text.split(/(\[\d+\])/g);
+    return parts.map((part, i) => {
+      const match = part.match(/\[(\d+)\]/);
+      if (match) {
+        const id = match[1];
+        return (
+          <a key={i} href={`#source-${id}`} style={{
+            color: 'var(--accent)',
+            textDecoration: 'none',
+            fontSize: '0.75em',
+            verticalAlign: 'super',
+            cursor: 'pointer',
+            padding: '0 0.1em'
+          }} title={`Jump to Source Rank ${id}`}>
+            {part}
+          </a>
+        );
+      }
+      return <span key={i}>{part}</span>;
+    });
+  };
+
   return (
     <div className="animate-slide-up" style={{ marginBottom: '4rem', marginLeft: '2rem' }}>
-      <div className="answer-content reading-measure">
-        {/* Simple paragraph splitting for better readability */}
-        {message.text.split('\n').filter(p => p.trim() !== '').map((paragraph, idx) => (
-          <p key={idx}>{paragraph}</p>
-        ))}
-      </div>
-      {(message.sources || message.cached) && (
-        <SourceHighlight sources={message.sources} cached={message.cached} />
+      
+      {message.isFailure ? (
+        <div style={{ borderLeft: '3px solid var(--error)', padding: '1.5rem', background: 'var(--bg-tertiary)', borderRadius: '0 var(--radius-sm) var(--radius-sm) 0' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--error)', marginBottom: '0.5rem', fontFamily: 'var(--font-mono)', fontSize: '0.75rem' }}>
+            <AlertCircle size={14} /> NO CONTEXTUAL MATCH
+          </div>
+          <p style={{ color: 'var(--text-primary)', lineHeight: 1.6 }}>{message.text}</p>
+        </div>
+      ) : (
+        <div className="answer-content reading-measure">
+          {message.text.split('\n').filter(p => p.trim() !== '').map((paragraph, idx) => (
+            <p key={idx}>{renderTextWithCitations(paragraph)}</p>
+          ))}
+        </div>
+      )}
+
+      {message.sources && message.sources.length > 0 && (
+        <SourceHighlight sources={message.sources} cached={message.cached} query={message.originalQuery} />
       )}
     </div>
   );
@@ -201,29 +289,48 @@ function App() {
       if (data.answer.toLowerCase().includes("i don't know") || data.answer.toLowerCase().includes("does not contain")) {
         setMessages(prev => [...prev, { 
           role: 'assistant', 
-          text: "The document does not appear to contain definitive information regarding this query. Please try refining your question or focusing on specific keywords covered in the text.", 
+          text: "The document does not contain definitive information regarding this query. Ensure the topic is covered in the provided text, or try using alternate phrasing.", 
           sources: [],
           cached: data.cached,
-          isFailure: true
+          isFailure: true,
+          originalQuery: userQuery
         }]);
       } else {
         setMessages(prev => [...prev, { 
           role: 'assistant', 
           text: data.answer, 
           sources: data.sources,
-          cached: data.cached 
+          cached: data.cached,
+          originalQuery: userQuery
         }]);
       }
     } catch (err) {
       setMessages(prev => [...prev, { 
         role: 'assistant', 
         text: 'The system encountered an error connecting to the retrieval pipeline. Please ensure the backend service is operational.',
-        isFailure: true
+        isFailure: true,
+        originalQuery: userQuery
       }]);
     } finally {
       setIsQuerying(false);
     }
   };
+
+  const placeholders = useMemo(() => [
+    "Query the text dynamics...",
+    "Extract specific definitions...",
+    "What core methodology is proposed?",
+    "Summarize the conclusion..."
+  ], []);
+  
+  const [phIndex, setPhIndex] = useState(0);
+
+  useEffect(() => {
+    if (status === 'ready' && !query) {
+      const interval = setInterval(() => setPhIndex(p => (p + 1) % placeholders.length), 3500);
+      return () => clearInterval(interval);
+    }
+  }, [status, query, placeholders]);
 
   return (
     <div className="container" style={{ position: 'relative', paddingBottom: '8rem' }}>
@@ -338,7 +445,7 @@ function App() {
               <input
                 type="text"
                 className="editorial-input"
-                placeholder="Query the text..."
+                placeholder={placeholders[phIndex]}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
                 autoFocus
