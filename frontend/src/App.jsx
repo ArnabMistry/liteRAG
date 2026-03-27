@@ -489,16 +489,16 @@ function App() {
           </label>
         </div>
 
-        {status === 'idle' && (
+        {(status === 'idle' || status === 'uploading') && (
           <div className="animate-fade-in" style={{ marginTop: '4rem', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '2rem' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', color: 'var(--text-muted)', fontSize: '0.8rem', fontFamily: 'var(--font-mono)', letterSpacing: '0.05em' }}>
-              <span>EXTRACT</span>
-              <ChevronRight size={14} opacity={0.4} />
-              <span>CHUNK</span>
-              <ChevronRight size={14} opacity={0.4} />
-              <span>EMBED</span>
-              <ChevronRight size={14} opacity={0.4} />
-              <span>QUERY</span>
+            <div className="system-pipeline" style={{ display: 'flex', alignItems: 'center', gap: '1rem', fontSize: '0.85rem', fontFamily: 'var(--font-mono)', letterSpacing: '0.05em', fontWeight: 500 }}>
+              <span className={`pipeline-step ${uploadStages.find(s => s.msg === 'Extracting...' && s.isCurrent) ? 'active' : ''} ${uploadStages.find(s => s.msg === 'Extracting...' && s.isDone) ? 'done' : ''}`}>EXTRACT</span>
+              <ChevronRight size={14} className="pipeline-chevron" />
+              <span className={`pipeline-step ${uploadStages.find(s => s.msg === 'Chunking...' && s.isCurrent) ? 'active' : ''} ${uploadStages.find(s => s.msg === 'Chunking...' && s.isDone) ? 'done' : ''}`}>CHUNK</span>
+              <ChevronRight size={14} className="pipeline-chevron" />
+              <span className={`pipeline-step ${uploadStages.find(s => (s.msg === 'Embedding...' || s.msg === 'Indexing...') && s.isCurrent) ? 'active' : ''} ${uploadStages.find(s => s.msg === 'Indexing...' && s.isDone) ? 'done' : ''}`}>EMBED</span>
+              <ChevronRight size={14} className="pipeline-chevron" />
+              <span className="pipeline-step">QUERY</span>
             </div>
             
             <div style={{ display: 'flex', alignItems: 'center', gap: '2rem', color: 'var(--text-muted)', fontSize: '0.85rem' }}>

@@ -248,3 +248,42 @@ p {
   border-color: var(--accent);
   background: var(--bg-tertiary);
 }
+
+/* System Pipeline Visibility */
+.system-pipeline {
+  padding: 0.75rem 1.5rem;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  color: var(--text-secondary);
+}
+
+.pipeline-step {
+  padding: 0.25rem 0.5rem;
+  border-radius: var(--radius-sm);
+  transition: all 0.3s ease;
+  color: var(--text-muted);
+}
+
+.pipeline-step.active {
+  color: var(--accent);
+  background: var(--accent-softer);
+  text-shadow: 0 0 10px var(--accent-soft);
+  animation: pulse-text 1.5s infinite ease-in-out;
+}
+
+.pipeline-step.done {
+  color: var(--text-primary);
+}
+
+.pipeline-chevron {
+  opacity: 0.4;
+  color: var(--text-muted);
+}
+
+@keyframes pulse-text {
+  0% { opacity: 0.7; }
+  50% { opacity: 1; filter: drop-shadow(0 0 2px var(--accent)); }
+  100% { opacity: 0.7; }
+}
