@@ -1,19 +1,25 @@
 import json
 import os
 import hashlib
+from pathlib import Path
 from typing import Optional
 
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE_DIR / "data"
+DEFAULT_CACHE_PATH = DATA_DIR / "query_cache.json"
+
 class QueryCache:
-    def __init__(self, cache_path: str = "backend/data/query_cache.json"):
-        self.cache_path = cache_path
+    def __init__(self, cache_path: str | os.PathLike | None = None):
+        self.cache_path = Path(cache_path) if cache_path else DEFAULT_CACHE_PATH
+        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
         self.cache = self._load_cache()
 
     def _load_cache(self) -> dict:
-        if os.path.exists(self.cache_path):
+        if self.cache_path.exists():
             try:
-                with open(self.cache_path, "r") as f:
+                with open(self.cache_path, "r", encoding="utf-8") as f:
                     return json.load(f)
-            except:
+            except Exception:
                 return {}
         return {}
 
@@ -33,7 +39,7 @@ class QueryCache:
         self._save_cache()
 
     def _save_cache(self):
-        with open(self.cache_path, "w") as f:
+        with open(self.cache_path, "w", encoding="utf-8") as f:
             json.dump(self.cache, f)
 
     def clear(self):

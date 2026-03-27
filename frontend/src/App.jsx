@@ -2,6 +2,32 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Upload, FileText, Loader2, Send, ChevronRight, ChevronDown, CheckCircle2, AlertCircle, BookOpen, Clock, Zap, FileSearch } from 'lucide-react';
 
 const API_BASE = "http://localhost:8000";
+const SESSION_STORAGE_KEY = "liteRAG-session";
+
+const loadStoredSession = () => {
+  try {
+    const raw = window.localStorage.getItem(SESSION_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : { id: null, documentName: null };
+  } catch {
+    return { id: null, documentName: null };
+  }
+};
+
+const saveStoredSession = (session) => {
+  try {
+    window.localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
+  } catch {
+    // Ignore storage failures and continue with in-memory state.
+  }
+};
+
+const clearStoredSession = () => {
+  try {
+    window.localStorage.removeItem(SESSION_STORAGE_KEY);
+  } catch {
+    // Ignore storage failures and continue with in-memory state.
+  }
+};
 
 // --- Helpers ---
 const getConfidenceColor = (score) => {
@@ -260,11 +286,12 @@ const TranscriptItem = ({ message }) => {
 // --- Main App ---
 
 function App() {
-  const [session, setSession] = useState({ id: null, documentName: null });
-  const [status, setStatus] = useState('idle'); // idle, uploading, ready
+  const [session, setSession] = useState(() => loadStoredSession());
+  const [status, setStatus] = useState('checking'); // checking, idle, uploading, ready
   const [uploadStages, setUploadStages] = useState([]);
   const [messages, setMessages] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
+  const [isResetting, setIsResetting] = useState(false);
   
   const handleDragOver = (e) => {
     e.preventDefault();
@@ -285,6 +312,47 @@ function App() {
   const [isQuerying, setIsQuerying] = useState(false);
   
   const bottomRef = useRef(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const initializeFromBackend = async () => {
+      try {
+        const response = await fetch(`${API_BASE}/status`);
+        if (!response.ok) throw new Error('Status check failed');
+
+        const data = await response.json();
+        if (cancelled) return;
+
+        if (data.indexed) {
+          const storedSession = loadStoredSession();
+          const nextSession = storedSession?.documentName
+            ? storedSession
+            : { id: 'persisted-index', documentName: data.source || 'Indexed document' };
+
+          setSession(nextSession);
+          saveStoredSession(nextSession);
+          setStatus('ready');
+          return;
+        }
+
+        clearStoredSession();
+        setSession({ id: null, documentName: null });
+        setMessages([]);
+        setStatus('idle');
+      } catch (err) {
+        if (cancelled) return;
+        console.error(err);
+        setStatus('idle');
+      }
+    };
+
+    initializeFromBackend();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (messages.length > 0) {
@@ -327,7 +395,9 @@ function App() {
       
       setTimeout(() => {
         addUploadStage('Indexing...', false, true);
-        setSession({ id: data.file_id || Date.now(), documentName: uploadedFile.name });
+        const nextSession = { id: data.file_id || Date.now(), documentName: uploadedFile.name };
+        setSession(nextSession);
+        saveStoredSession(nextSession);
         setStatus('ready');
       }, 500);
       
@@ -387,6 +457,38 @@ function App() {
     }
   };
 
+  const handleResetSession = async () => {
+    if (isResetting) return;
+
+    const confirmed = window.confirm(
+      'Start a new session? This will clear the currently indexed document and cached answers.'
+    );
+
+    if (!confirmed) return;
+
+    setIsResetting(true);
+
+    try {
+      const response = await fetch(`${API_BASE}/reset`, {
+        method: 'POST',
+      });
+
+      if (!response.ok) throw new Error('Reset failed');
+
+      clearStoredSession();
+      setSession({ id: null, documentName: null });
+      setMessages([]);
+      setUploadStages([]);
+      setQuery('');
+      setStatus('idle');
+    } catch (err) {
+      console.error(err);
+      alert('Failed to reset the current session. Please try again.');
+    } finally {
+      setIsResetting(false);
+    }
+  };
+
   const placeholders = useMemo(() => [
     "Query the text dynamics...",
     "Extract specific definitions...",
@@ -424,9 +526,31 @@ function App() {
               <Clock size={12} />
               <span className="mono-text" style={{ fontSize: '0.7rem' }}>Session Active</span>
             </div>
+            {status === 'ready' && (
+              <button
+                type="button"
+                className="session-reset-btn"
+                onClick={handleResetSession}
+                disabled={isResetting}
+              >
+                {isResetting ? 'Resetting...' : 'Start New Session'}
+              </button>
+            )}
           </div>
         )}
       </header>
+
+      {status === 'checking' && (
+        <div className="animate-fade-in" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '50vh', gap: '1rem', textAlign: 'center' }}>
+          <Loader2 size={28} className="animate-spin" color="var(--accent)" />
+          <div>
+            <h2 style={{ marginBottom: '0.5rem' }}>Checking Indexed State</h2>
+            <p style={{ color: 'var(--text-secondary)', maxWidth: '420px' }}>
+              Reconnecting the interface to the persisted backend index so the correct workspace loads after refresh.
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Upload State */}
       {(status === 'idle' || status === 'uploading') && (

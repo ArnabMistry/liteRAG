@@ -4,10 +4,14 @@ from pydantic import BaseModel
 import shutil
 import os
 import uuid
-import time
+from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv()
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE_DIR / "data"
+UPLOAD_DIR = DATA_DIR / "uploads"
+
+load_dotenv(BASE_DIR / ".env")
 
 from app.ingestion import PDFIngestor
 from app.chunking import SemanticChunker
@@ -29,16 +33,41 @@ app.add_middleware(
 
 # Initialize components
 embedding_engine = EmbeddingEngine()
-vector_store = VectorStore(dimension=embedding_engine.dimension)
+try:
+    vector_store = VectorStore(dimension=embedding_engine.dimension)
+except RuntimeError as exc:
+    print(f"Vector store load failed during startup: {exc}")
+    vector_store = VectorStore(dimension=embedding_engine.dimension, auto_load=False)
 optimizer = ContextOptimizer(token_limit=1500)
 cache = QueryCache()
 generator = AnswerGenerator()
 
-UPLOAD_DIR = "backend/data/uploads"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 class QueryRequest(BaseModel):
     query: str
+
+@app.get("/status")
+async def get_status():
+    is_indexed = vector_store.has_documents()
+    latest_metadata = vector_store.metadata[0]["metadata"] if is_indexed and vector_store.metadata else {}
+
+    return {
+        "indexed": is_indexed,
+        "chunks": len(vector_store.metadata),
+        "source": latest_metadata.get("source"),
+        "pages": latest_metadata.get("total_pages"),
+    }
+
+@app.post("/reset")
+async def reset_session():
+    try:
+        vector_store.reset()
+        cache.clear()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to reset session state.") from exc
+
+    return {"message": "Session reset successfully", "indexed": False}
 
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
@@ -46,33 +75,46 @@ async def upload_pdf(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="Only PDF files are allowed.")
     
     file_id = str(uuid.uuid4())
-    file_path = os.path.join(UPLOAD_DIR, f"{file_id}.pdf")
-    
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    file_path = UPLOAD_DIR / f"{file_id}.pdf"
+
+    try:
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to save uploaded PDF.") from exc
     
     # Processing stages for progress feedback (emulated via logging for now)
     print(f"[{file_id}] Stage: Extracting text...")
-    ingestor = PDFIngestor(file_path)
-    docs = ingestor.extract_text_with_metadata()
+    try:
+        ingestor = PDFIngestor(str(file_path))
+        docs = ingestor.extract_text_with_metadata()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to extract text from PDF.") from exc
     
     print(f"[{file_id}] Stage: Chunking...")
     chunker = SemanticChunker()
     chunks = chunker.chunk_documents(docs)
     
     print(f"[{file_id}] Stage: Generating embeddings...")
-    texts = [c["text"] for c in chunks]
-    embeddings = embedding_engine.generate_embeddings(texts)
+    try:
+        texts = [c["text"] for c in chunks]
+        embeddings = embedding_engine.generate_embeddings(texts)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to generate embeddings.") from exc
     
     print(f"[{file_id}] Stage: Indexing...")
-    vector_store.clear() # For simple version, we store one document at a time or reset
-    vector_store.metadata = [] # Reset metadata
-    vector_store.index = vector_store.index.__class__(vector_store.dimension) # Reset FAISS
-    vector_store.add_documents(embeddings, chunks)
-    vector_store.save()
+    try:
+        vector_store.clear()
+        vector_store.add_documents(embeddings, chunks)
+        vector_store.save()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to index document.") from exc
     
     # Invalidate cache on new upload
-    cache.clear()
+    try:
+        cache.clear()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to clear query cache.") from exc
     
     return {"message": "PDF processed and indexed successfully", "file_id": file_id, "pages": len(docs)}
 
@@ -81,14 +123,26 @@ async def query_document(request: QueryRequest):
     query = request.query
     
     # 1. Check Cache
-    cached_response = cache.get(query)
+    try:
+        cached_response = cache.get(query)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to read query cache.") from exc
+
     if cached_response:
         print(f"Cache hit -> skipping LLM")
         return {"answer": cached_response, "cached": True}
     
     # 2. Retrieve
-    query_emb = embedding_engine.generate_single_embedding(query)
-    retrieved_chunks = vector_store.search(query_emb, k=3, threshold=0.1) # Reduced k to 3 for precision
+    try:
+        query_emb = embedding_engine.generate_single_embedding(query)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to generate query embedding.") from exc
+
+    try:
+        retrieved_chunks = vector_store.search(query_emb, k=3, threshold=0.1) # Reduced k to 3 for precision
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to search vector store.") from exc
+
     print(f"Chunks retrieved: {len(retrieved_chunks)}")
     
     if not retrieved_chunks:
@@ -110,7 +164,11 @@ async def query_document(request: QueryRequest):
         direct_answer = f"(Direct Extract) {top_chunk_text}"
         
         # 5. Cache & Return directly
-        cache.set(query, direct_answer)
+        try:
+            cache.set(query, direct_answer)
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail="Failed to update query cache.") from exc
+
         return {
             "answer": direct_answer,
             "sources": [{
@@ -138,10 +196,16 @@ async def query_document(request: QueryRequest):
     
     # 5. Generate Answer
     print("Calling LLM")
-    answer = generator.generate_answer(query, context)
+    try:
+        answer = generator.generate_answer(query, context)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to generate answer from LLM.") from exc
     
     # 5. Cache & Return
-    cache.set(query, answer)
+    try:
+        cache.set(query, answer)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to update query cache.") from exc
     
     return {
         "answer": answer,
@@ -153,13 +217,6 @@ async def query_document(request: QueryRequest):
         } for i, c in enumerate(retrieved_chunks)],
         "cached": False
     }
-
-# Patch VectorStore clear method since it wasn't in original
-def vs_clear(self):
-    import faiss
-    self.index = faiss.IndexFlatL2(self.dimension)
-    self.metadata = []
-VectorStore.clear = vs_clear
 
 if __name__ == "__main__":
     import uvicorn
