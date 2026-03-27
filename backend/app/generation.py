@@ -15,7 +15,10 @@ class AnswerGenerator:
         if not context:
             return "I'm sorry, but I couldn't find any relevant information in the uploaded document to answer that question."
 
-        prompt = f"""Answer ONLY from context. If not found, say you don't know.
+        prompt = f"""Answer ONLY from context. If the context is insufficient, say you don't know.
+Be precise, grounded, and concise.
+When useful, cite page markers like [Page X] that already appear in the context.
+Do not invent facts, sources, or interpretations beyond the context.
 
 Context:
 {context}

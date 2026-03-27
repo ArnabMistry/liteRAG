@@ -21,6 +21,11 @@
       "sourceType": "github",
       "computedHash": "dd9eb2f0595ea631b87932026ee8c4556d63b13fcb97fb564b78bd59f2b1eee6"
     },
+    "rag-engineer": {
+      "source": "sickn33/antigravity-awesome-skills",
+      "sourceType": "github",
+      "computedHash": "fecfe351d455da392e2f1c5ddf2105e66c1b7dab2a7e8917b102a16cc562cc38"
+    },
     "rag-implementation": {
       "source": "wshobson/agents",
       "sourceType": "github",
