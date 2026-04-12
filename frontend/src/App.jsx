@@ -283,6 +283,29 @@ const TranscriptItem = ({ message }) => {
   );
 };
 
+const MemoizedSpinner = React.memo(({ size = 24, color = "currentColor", className = "" }) => (
+  <Loader2 size={size} color={color} className={`animate-spin ${className}`} style={{ willChange: 'transform' }} />
+));
+
+const QueryStatusText = React.memo(() => {
+  const [textIndex, setTextIndex] = useState(0);
+  const loadingTexts = useMemo(() => [
+    "Retrieving Context...",
+    "Synthesizing Information...",
+    "Generating Response...",
+    "Finalizing..."
+  ], []);
+  
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setTextIndex(p => (p + 1) % loadingTexts.length);
+    }, 1500);
+    return () => clearInterval(interval);
+  }, [loadingTexts.length]);
+
+  return <span className="mono-text" style={{ fontSize: '0.8rem', letterSpacing: '0.05em' }}>{loadingTexts[textIndex]}</span>;
+});
+
 // --- Main App ---
 
 function App() {
@@ -542,7 +565,7 @@ function App() {
 
       {status === 'checking' && (
         <div className="animate-fade-in" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '50vh', gap: '1rem', textAlign: 'center' }}>
-          <Loader2 size={28} className="animate-spin" color="var(--accent)" />
+          <MemoizedSpinner size={28} color="var(--accent)" />
           <div>
             <h2 style={{ marginBottom: '0.5rem' }}>Checking Indexed State</h2>
             <p style={{ color: 'var(--text-secondary)', maxWidth: '420px' }}>
@@ -595,7 +618,7 @@ function App() {
                       {stage.isDone ? (
                         <CheckCircle2 size={18} color="var(--success)" />
                       ) : stage.isCurrent ? (
-                        <Loader2 size={18} className="animate-spin" color="var(--accent)" />
+                        <MemoizedSpinner size={18} color="var(--accent)" />
                       ) : (
                         <div style={{ width: '18px', height: '18px', border: '1px solid var(--border)', borderRadius: '50%' }} />
                       )}
@@ -652,8 +675,8 @@ function App() {
               
               {isQuerying && (
                 <div className="animate-fade-in" style={{ marginLeft: '2rem', display: 'flex', alignItems: 'center', gap: '0.75rem', color: 'var(--accent)', marginTop: '2rem' }}>
-                  <Loader2 size={16} className="animate-spin" />
-                  <span className="mono-text" style={{ fontSize: '0.8rem', letterSpacing: '0.05em' }}>Retrieving Context & Generating Synthesis...</span>
+                  <MemoizedSpinner size={16} />
+                  <QueryStatusText />
                 </div>
               )}
             </div>

@@ -1,1126 +1,927 @@
 # Backend Context for liteRAG
 
-This document describes how the current liteRAG backend works as implemented in the repository at the time of analysis. It is intended to be a single technical reference for onboarding, debugging, and tracing request execution.
+This document is a code-verified description of the current backend implementation in `backend/app` and `backend/tests`. It is intended to be a single source of truth for onboarding, debugging, and reasoning about runtime behavior.
 
 ## 1. System Overview
 
-### What the backend does
+### What the system does now
 
-The backend is a FastAPI service that lets a client:
+The backend is a FastAPI service that supports a single-document Retrieval-Augmented Generation workflow:
 
-1. Upload a PDF with `POST /upload`
-2. Extract page text from that PDF
-3. Split the extracted text into overlapping chunks
-4. Convert each chunk into a dense embedding with a local sentence-transformers model
-5. Index the embeddings in an in-memory FAISS `IndexFlatL2`
-6. Persist the FAISS index and chunk metadata to disk
-7. Answer user questions with `POST /query` by retrieving relevant chunks, compressing them into a smaller context string, optionally calling Gemini, and caching answers
+- `POST /upload` ingests one PDF, extracts page text, chunks it, embeds the chunks, indexes them in FAISS, persists the index and metadata, and clears prior query cache state.
+- `POST /query` processes a natural-language question through query classification, hybrid retrieval, fusion, reranking, adaptive filtering, sentence-level context optimization, confidence scoring, and either direct extraction, Gemini generation, or refusal.
+- `GET /status` reports whether an indexed corpus exists.
+- `POST /reset` removes the persisted index and cache and returns the system to an empty state.
 
-### High-level architecture
+The system currently behaves as a single active-corpus assistant rather than a multi-document knowledge base. A new upload replaces the previously indexed corpus.
 
-The system is modular but still very lightweight. The modules are:
+### Evolution summary
 
-- `backend/app/main.py`: FastAPI entry point and orchestration layer
-- `backend/app/ingestion.py`: PDF text extraction
-- `backend/app/chunking.py`: chunk creation
-- `backend/app/embeddings.py`: embedding generation
-- `backend/app/retrieval.py`: FAISS-backed vector store and search
-- `backend/app/optimization.py`: non-LLM context compression
-- `backend/app/cache.py`: disk-backed exact-match query cache
-- `backend/app/generation.py`: Gemini call wrapper
+The backend has evolved from a simple dense-only FAISS search service into a multi-stage RAG pipeline with:
 
-The runtime model is simple:
+- semantic chunking that respects sentence and paragraph boundaries
+- hybrid retrieval using dense search plus keyword search
+- Reciprocal Rank Fusion
+- a modular reranking layer with a cross-encoder primary path and heuristic fallback
+- sentence-level context compression
+- confidence-aware answer control flow
+- exact and semantic caching
+- a validation harness with labeled queries and retrieval metrics
+- recall-oriented soft fallback behavior when strict selection would otherwise reject all candidates
 
-- One process
-- One global embedding model
-- One global vector store object
-- One global cache object
-- One global answer generator
-- One active document corpus at a time in practice
+### Key architectural principles
 
-### Key design decisions visible in the code
-
-- Retrieval uses exact FAISS L2 search with `IndexFlatL2`, not approximate ANN search.
-- Embeddings come from the local `sentence-transformers` model `all-MiniLM-L6-v2`.
-- Chunking is word-count based, not sentence-aware or semantic-model based.
-- Query caching is exact-match after normalization with `strip().lower()`.
-- A new upload clears the previous index and cache instead of merging documents.
-- Query handling has a "simple query" fast path that skips the LLM and returns the top retrieved chunk directly.
-- Context optimization is done heuristically with sentence-level Jaccard scoring, not with an LLM summarizer.
+- Keep the architecture lightweight: FastAPI, FAISS, sentence-transformers, and Gemini remain the core stack.
+- Separate retrieval stages explicitly: retrieval, fusion, reranking, filtering, and context optimization are distinct steps.
+- Prefer grounded answers over free-form generation: Gemini is prompted to answer only from provided context.
+- Persist state on disk: the vector index, metadata, and cache survive process restarts.
+- Preserve explainability: responses include sources, pages, confidence, and reasoning summaries.
+- Bias toward safety at the answer layer, but the current recall-oriented implementation now allows low-confidence fallback generation when partial context exists.
 
 ## 2. End-to-End Flow
 
-### Upload Flow: `POST /upload`
+### Upload Pipeline
 
-The `/upload` route in `backend/app/main.py` performs these steps:
+`POST /upload` in `backend/app/main.py` performs the following steps:
 
-1. Validate file type.
-   - The route only checks `file.filename.endswith(".pdf")`.
-   - Validation is filename-based, not content-based.
+1. Validate the uploaded filename by checking `.pdf` suffix.
+2. Save the upload to `backend/data/uploads/<uuid>.pdf`.
+3. Extract text with `PDFIngestor.extract_text_with_metadata()`.
+4. Chunk extracted page text with `SemanticChunker.chunk_documents()`.
+5. Generate embeddings with `EmbeddingEngine.generate_embeddings()`.
+6. Clear the current vector store.
+7. Add the new embeddings and chunk metadata to the vector store.
+8. Persist FAISS index and metadata to disk.
+9. Clear the query cache so old answers cannot survive across document replacement.
+10. Return a success payload including generated `file_id` and page count.
 
-2. Generate a file ID.
-   - A UUID string is created with `uuid.uuid4()`.
-   - The file is saved as `<uuid>.pdf`.
+### Query Pipeline
 
-3. Save the uploaded file to disk.
-   - Target directory: `backend/data/uploads` relative to the process working directory.
-   - The directory is created at startup with `os.makedirs(..., exist_ok=True)`.
+`POST /query` in `backend/app/main.py` currently behaves as:
 
-4. Extract text from the PDF.
-   - `PDFIngestor(file_path)` is instantiated.
-   - `extract_text_with_metadata()` opens the PDF with PyMuPDF (`fitz.open`).
-   - Each page is loaded individually.
-   - `page.get_text("text").strip()` is used.
-   - Empty pages are skipped.
-   - Output is a list of page objects with:
-     - `text`
-     - `metadata.source`
-     - `metadata.page`
-     - `metadata.total_pages`
+```text
+Query
+ -> Query Processing
+ -> Cache Check
+ -> Hybrid Retrieval
+ -> Fusion (RRF)
+ -> Reranking
+ -> Candidate Filtering
+ -> Optional Soft Fallback
+ -> Context Optimization
+ -> Confidence Calculation
+ -> LLM Decision or Direct Extract
+ -> Answer Generation or Refusal
+ -> Caching
+```
 
-5. Chunk the extracted pages.
-   - `SemanticChunker()` is instantiated with defaults:
-     - `chunk_size=500`
-     - `chunk_overlap=50`
-   - `chunk_documents(docs)` splits each page into chunks by words.
-   - For each chunk, metadata is extended with:
-     - `chunk_id`
-     - `sub_chunk_index`
+Step-by-step:
 
-6. Generate embeddings.
-   - `texts = [c["text"] for c in chunks]`
-   - `EmbeddingEngine.generate_embeddings(texts)` returns a NumPy array.
-   - The embedding model dimension is discovered at startup and passed into `VectorStore`.
+1. Build a query package with `QueryProcessor.build_query_package()`.
+2. Derive:
+   - `embedding_query`: usually the raw query, except for a few hand-authored expansions
+   - `keyword_query`: always the raw user query
+   - `query_type`, classification confidence, and behavior flags
+3. Generate a dense query embedding from `embedding_query`.
+4. Check the cache:
+   - exact lookup by normalized query hash
+   - semantic lookup by cosine similarity over stored query embeddings
+5. If no cache hit exists, call `VectorStore.hybrid_search()`:
+   - dense FAISS retrieval
+   - BM25-style keyword retrieval
+   - RRF fusion
+   - reranking
+   - adaptive final filtering
+   - optional soft fallback if strict filtering yields nothing
+6. Compute a confidence payload from retrieved chunk scores and lexical support.
+7. Build a source payload from retrieved chunks for transparency.
+8. Run `ContextOptimizer.build_context_package()` to construct sentence-level context.
+9. If sentence selection collapses to nothing but retrieved chunks exist, build a weak fallback context from the top retrieved chunk(s) and force low confidence.
+10. Decide answer path:
+    - direct extract for some simple high-confidence definition/fact queries
+    - Gemini generation for grounded context
+    - refusal when context is too weak or absent
+11. Prefix low-confidence generated answers with explicit uncertainty text.
+12. Cache the final response payload, including answer, sources, confidence, reasoning summary, pages, query type, and optionally query embedding.
 
-7. Reset the vector store.
-   - `vector_store.clear()` is called.
-   - `vector_store.metadata = []` is set again explicitly.
-   - `vector_store.index = vector_store.index.__class__(vector_store.dimension)` reinitializes the FAISS index.
-   - This means uploads replace the previous searchable corpus rather than append to it.
-
-8. Add documents to the vector store.
-   - `vector_store.add_documents(embeddings, chunks)` adds vectors to FAISS and stores chunk payloads in memory.
-
-9. Persist index and metadata.
-   - `vector_store.save()` writes:
-     - FAISS binary index to `backend/data/faiss_index.bin`
-     - metadata JSON to `backend/data/metadata.json`
-
-10. Invalidate the query cache.
-    - `cache.clear()` empties the in-memory map and rewrites the cache file.
-
-11. Return response.
-    - The route returns:
-      - success message
-      - generated `file_id`
-      - number of extracted non-empty pages
-
-### Query Flow: `POST /query`
-
-The `/query` route performs these steps:
-
-1. Read the request body.
-   - Request model: `QueryRequest`
-   - Required field: `query: str`
-
-2. Check the cache first.
-   - `cache.get(query)` normalizes the query with `strip().lower()`.
-   - The normalized query is hashed with MD5.
-   - If found, the route returns immediately with:
-     - `answer`
-     - `cached: True`
-   - Cached responses do not return `sources`.
-
-3. Generate a query embedding.
-   - `EmbeddingEngine.generate_single_embedding(query)` returns a single vector.
-
-4. Retrieve nearest chunks.
-   - `vector_store.search(query_emb, k=3, threshold=0.1)` is used.
-   - The vector store runs FAISS L2 search against the current in-memory index.
-   - Returned distances are converted to similarity scores using:
-     - `score = 1.0 / (1.0 + dist)`
-   - Any chunk below the threshold is dropped.
-   - Retrieved chunks include:
-     - `text`
-     - `metadata`
-     - `score`
-     - `rank`
-
-5. Handle empty retrieval.
-   - If no chunks survive thresholding, the route returns:
-     - a fallback "I don't know" style answer
-     - `sources: []`
-     - `cached: False`
-   - In this path the LLM is not called.
-
-6. Check the simple-query fast path.
-   - A query is considered simple if:
-     - it starts with one of:
-       - `what is `
-       - `what are `
-       - `define `
-       - `who is `
-       - `explain `
-     - and contains fewer than 8 whitespace-separated terms
-   - If true:
-     - the top retrieved chunk text is returned directly
-     - the answer is prefixed with `(Direct Extract)`
-     - the LLM is skipped
-     - the result is cached
-     - `sources` are returned from the retrieved chunks
-
-7. Optimize context for the LLM.
-   - `ContextOptimizer.optimize_context(query, retrieved_chunks)` scores sentences from the retrieved chunks.
-   - Only selected sentences are kept under an estimated token budget.
-   - The optimizer in `main.py` is initialized with `token_limit=1500`.
-
-8. Handle empty or too-short context.
-   - If the optimized context is missing or shorter than 10 stripped characters, the route returns the same no-context fallback answer and skips the LLM.
-
-9. Call the LLM.
-   - `AnswerGenerator.generate_answer(query, context)` creates a prompt and calls Gemini through `google.genai`.
-
-10. Cache the LLM answer.
-    - `cache.set(query, answer)` stores the final answer under the normalized-query MD5 key.
-
-11. Return response with sources.
-    - The response includes:
-      - `answer`
-      - `sources`
-      - `cached: False`
-
-## 3. File-by-File Breakdown
+## 3. Component Breakdown
 
 ### `backend/app/main.py`
 
-#### Purpose
+Purpose:
 
-Acts as the HTTP entry point and request orchestrator. It wires together all backend components and owns the upload and query flows.
+- FastAPI entry point
+- lifecycle setup for global backend components
+- orchestration for upload, query, status, and reset endpoints
 
-#### Key objects created at import time
+Key global objects:
 
-- `embedding_engine = EmbeddingEngine()`
-- `vector_store = VectorStore(dimension=embedding_engine.dimension)`
-- `optimizer = ContextOptimizer(token_limit=1500)`
-- `cache = QueryCache()`
-- `generator = AnswerGenerator()`
+- `EmbeddingEngine()`
+- `VectorStore(dimension=embedding_engine.dimension)`
+- `ContextOptimizer(token_limit=800)`
+- `QueryCache()`
+- `AnswerGenerator()`
+- `QueryProcessor()`
 
-These are module-level singletons created when `main.py` is imported.
+Important endpoint behavior:
 
-#### Main responsibilities
+- `GET /status`
+  - returns whether any indexed corpus exists
+  - also returns chunk count and metadata from the first chunk when available
+- `POST /reset`
+  - calls `vector_store.reset()` and `cache.clear()`
+- `POST /upload`
+  - replaces the active corpus
+- `POST /query`
+  - runs the full retrieval and answer pipeline
 
-- Configure the FastAPI app
-- Configure permissive CORS with `allow_origins=["*"]`
-- Create the upload directory
-- Define the request model `QueryRequest`
-- Implement `/upload`
-- Implement `/query`
-- Monkey-patch a `clear` method onto `VectorStore`
+Important helper functions:
 
-#### Internal logic details
+- `build_confidence_payload()`
+  - derives confidence from rerank scores, cross-encoder scores, lexical overlap, dense support, keyword support, and source count
+- `apply_confidence_overrides()`
+  - forces low confidence when soft fallback retrieval was used
+- `should_skip_llm()`
+  - decides when generation should be blocked
+  - currently returns `False` for low-confidence context as long as minimal weak-context budget exists, which enables cautious fallback generation
+- `build_sources_payload()`
+  - creates structured source entries returned to the client
+- `build_direct_answer()`
+  - returns a direct extract for simple high-confidence queries
+- `build_weak_context_package()`
+  - constructs context from top retrieved chunks when sentence-level compression yields no usable sentences
+- `apply_uncertainty_prefix()`
+  - marks low-confidence generated answers explicitly
 
-- `load_dotenv()` is called before importing application modules, so `.env` values are loaded into the process environment if present.
-- `UPLOAD_DIR` is set to `backend/data/uploads`.
-- The route handlers use `print(...)` for progress and tracing rather than structured logging.
-- `VectorStore.clear` is not defined in `retrieval.py`; instead a replacement function `vs_clear` is attached dynamically in `main.py`.
+Data flow:
 
-#### Important data flow
-
-- `/upload` sends extracted page dicts into chunking, chunk dicts into embeddings, embeddings plus chunk dicts into the vector store.
-- `/query` sends the raw query through cache lookup, embedding generation, vector search, optional context optimization, optional LLM generation, then cache write-back.
-
-#### Dependencies
-
-- FastAPI, Pydantic, CORS middleware, dotenv
-- All application modules in `backend/app`
-- `shutil`, `os`, `uuid`, `time` from the standard library
+- query package -> cache -> retrieval telemetry -> confidence -> context -> decision -> response payload -> cache
 
 ### `backend/app/ingestion.py`
 
-#### Purpose
+Purpose:
 
-Extracts page-level text and attaches per-page metadata from a PDF.
+- PDF text extraction with page metadata
 
-#### Main class
+Implementation:
 
-- `PDFIngestor`
+- uses PyMuPDF via `fitz`
+- iterates page by page
+- extracts text with `page.get_text("text")`
+- skips empty pages
 
-#### Key methods
+Returned structure:
 
-- `__init__(file_path: str)`
-  - Stores the PDF path
-  - Derives `source_name` with `os.path.basename(file_path)`
-
-- `extract_text_with_metadata() -> List[Dict]`
-  - Opens the PDF with `fitz.open`
-  - Iterates through every page index
-  - Calls `page.get_text("text")`
-  - Strips whitespace
-  - Skips empty pages
-  - Returns one list item per non-empty page
-
-#### Output structure
-
-Each returned item is shaped like:
-
-```python
-{
-    "text": "<page text>",
-    "metadata": {
-        "source": "<uploaded filename on disk>",
-        "page": <1-based page number>,
-        "total_pages": <total page count>
-    }
-}
-```
-
-#### Dependencies
-
-- PyMuPDF via `fitz`
-- `typing`
-- `os`
+- list of page dictionaries:
+  - `text`
+  - `metadata.source`
+  - `metadata.page`
+  - `metadata.total_pages`
 
 ### `backend/app/chunking.py`
 
-#### Purpose
+Purpose:
 
-Converts page-level text objects into overlapping word-based chunks while preserving provenance metadata.
+- split extracted page text into chunk units that preserve more structure than fixed word windows
 
-#### Main class
+Implementation:
 
-- `SemanticChunker`
+- paragraphs are split on blank lines
+- paragraphs are further split into sentences
+- chunks are accumulated sentence by sentence until `chunk_size` would be exceeded
+- overlap is preserved by carrying the last `chunk_overlap` words into the next chunk
 
-The name implies semantic chunking, but the implementation is purely word-window based.
+Defaults:
 
-#### Key methods
+- `chunk_size = 500` words
+- `chunk_overlap = 60` words
 
-- `__init__(chunk_size=500, chunk_overlap=50)`
-  - Configures the target words per chunk and overlap size.
+Chunk metadata added:
 
-- `split_text(text: str) -> List[str]`
-  - Splits on whitespace using `text.split()`
-  - Builds windows of `chunk_size` words
-  - Advances by `chunk_size - chunk_overlap`
-  - Stops after the last window
+- `chunk_id`
+- `sub_chunk_index`
 
-- `chunk_documents(documents: List[Dict]) -> List[Dict]`
-  - Loops through each page object
-  - Splits its `text`
-  - Extends the page metadata for each chunk
-  - Adds:
-    - `chunk_id`: monotonically increasing across the whole upload
-    - `sub_chunk_index`: zero-based chunk index within the source page
-
-#### Output structure
-
-```python
-{
-    "text": "<chunk text>",
-    "metadata": {
-        "source": "<uuid>.pdf",
-        "page": 5,
-        "total_pages": 79,
-        "chunk_id": 17,
-        "sub_chunk_index": 1
-    }
-}
-```
-
-#### Dependencies
-
-- `typing`
-- `re` is imported but not used
+This is more semantic than the original word-only chunking but still heuristic, not embedding-based topic segmentation.
 
 ### `backend/app/embeddings.py`
 
-#### Purpose
+Purpose:
 
-Provides a thin wrapper around a sentence-transformers embedding model.
+- generate dense embeddings for chunks and queries
 
-#### Main class
+Implementation:
 
-- `EmbeddingEngine`
+- uses `SentenceTransformer("all-MiniLM-L6-v2")`
+- `generate_embeddings()` returns a NumPy array for a list of texts
+- `generate_single_embedding()` returns one embedding vector
 
-#### Key methods
+Notes:
 
-- `__init__(model_name="all-MiniLM-L6-v2")`
-  - Loads the model immediately
-  - Stores embedding dimensionality in `self.dimension`
-
-- `generate_embeddings(texts: List[str]) -> np.ndarray`
-  - Encodes a batch of strings
-  - Returns a NumPy array
-
-- `generate_single_embedding(text: str) -> np.ndarray`
-  - Encodes a single string by wrapping it in a one-element list
-  - Returns the first vector
-
-#### Data properties
-
-- Default model: `all-MiniLM-L6-v2`
-- The model dimension is discovered dynamically; for this model it is typically 384.
-
-#### Dependencies
-
-- `sentence_transformers.SentenceTransformer`
-- `numpy`
-- `typing`
+- embedding generation is synchronous
+- embeddings are not normalized manually in this module
 
 ### `backend/app/retrieval.py`
 
-#### Purpose
-
-Stores chunk embeddings, performs nearest-neighbor search, and persists retrieval state to disk.
-
-#### Main class
-
-- `VectorStore`
-
-#### Constructor behavior
-
-`VectorStore.__init__` creates:
-
-- `self.dimension`
-- `self.index_path` defaulting to `backend/data/faiss_index.bin`
-- `self.metadata_path` defaulting to `backend/data/metadata.json`
-- `self.index = faiss.IndexFlatL2(dimension)`
-- `self.metadata = []`
-
-The constructor does not automatically load any saved index from disk.
-
-#### Key methods
-
-- `add_documents(embeddings, metadata)`
-  - Verifies `embeddings.shape[0] == len(metadata)`
-  - Adds `float32` vectors to FAISS
-  - Extends `self.metadata` with the supplied chunk objects
-
-- `search(query_embedding, k=5, threshold=0.6)`
-  - Reshapes the query vector to `(1, dimension)`
-  - Converts to `float32`
-  - Runs `self.index.search(query_embedding, k)`
-  - Iterates through `(distance, index)` pairs
-  - Converts distance to a score with `1 / (1 + dist)`
-  - Drops anything below `threshold`
-  - Rebuilds a retrieval payload from `self.metadata[idx]`
-  - Assigns ranks in the order retained
-  - Calls `_log_retrieval(results)`
-
-- `_log_retrieval(results)`
-  - Prints score, page, chunk ID, and a 100-character preview
-
-- `save()`
-  - Writes the FAISS index to disk
-  - Serializes the metadata list to JSON
-
-- `load()`
-  - Reads both files if they exist
-  - Not invoked by `main.py`
-
-#### Search result format
-
-```python
-{
-    "text": "<chunk text>",
-    "metadata": {...},
-    "score": 0.42,
-    "rank": 1
-}
-```
-
-#### Dependencies
-
-- `faiss`
-- `numpy`
-- `json`
-- `os`
-- `typing`
-
-### `backend/app/optimization.py`
-
-#### Purpose
-
-Builds a smaller context string from retrieved chunks without calling an LLM.
-
-#### Main class
-
-- `ContextOptimizer`
-
-#### Core algorithm
-
-1. Tokenize the query into a lowercase word set using `re.findall(r'\w+', ...)`
-2. For every retrieved chunk:
-   - replace newlines with spaces
-   - split the chunk into sentences using `re.split(r'(?<=[.!?])\s+', ...)`
-   - ignore sentences shorter than 10 characters
-3. Score each sentence by:
-   - sentence-query Jaccard similarity
-   - plus `chunk_score * 0.1`
-4. Sort sentences by descending score
-5. Deduplicate by sentence-token Jaccard overlap
-   - if overlap with an already selected sentence is greater than `0.6`, skip it
-6. Estimate token cost as `len(sentence_text) // 4`
-7. Keep adding sentences until the configured token limit is reached
-8. Resort selected sentences by:
-   - ascending page number
-   - descending score within a page
-9. Build a context string with page headers like `[Page 7]`
-
-#### Important behavior
-
-- The optimizer is sentence-focused, not chunk-focused.
-- It can reorder content relative to the original retrieval ranking.
-- The token estimate is character-based rather than model-token based.
-- Page order is favored in the final assembly to preserve rough document flow.
-
-#### Dependencies
-
-- `re`
-- `typing`
-
-### `backend/app/cache.py`
-
-#### Purpose
-
-Caches final answers on disk so repeated identical normalized queries can bypass retrieval and generation.
-
-#### Main class
-
-- `QueryCache`
-
-#### Key methods
-
-- `__init__(cache_path="backend/data/query_cache.json")`
-  - Sets the cache file path
-  - Loads the cache from disk immediately
-
-- `_load_cache()`
-  - Reads JSON if the file exists
-  - Returns `{}` on any read/parse failure
-
-- `_normalize_query(query)`
-  - Returns `query.strip().lower()`
-
-- `get(query)`
-  - Normalizes the query
-  - MD5-hashes it
-  - Returns the cached string answer if present
-
-- `set(query, response)`
-  - Normalizes and hashes the query
-  - Stores the response string
-  - Writes the full cache back to disk
-
-- `clear()`
-  - Replaces the in-memory cache with an empty dict
-  - Writes the empty cache to disk
-
-#### Cache value format
-
-The cache file is a JSON object:
-
-```json
-{
-  "<md5-of-normalized-query>": "<answer text>"
-}
-```
-
-Only answers are cached. Source chunks, timestamps, model metadata, and upload IDs are not cached.
-
-#### Dependencies
-
-- `json`
-- `os`
-- `hashlib`
-- `typing`
-
-### `backend/app/generation.py`
-
-#### Purpose
-
-Encapsulates the Gemini call used to turn optimized context plus user query into a grounded answer.
-
-#### Main class
-
-- `AnswerGenerator`
-
-#### Key methods
-
-- `__init__(model_name="gemini-3-flash-preview")`
-  - Creates a `genai.Client()`
-  - Stores the model name
-  - Relies on environment configuration for authentication
-
-- `generate_answer(query, context)`
-  - Returns a fixed fallback if `context` is empty
-  - Otherwise constructs a text prompt:
-    - "Answer ONLY from context. If not found, say you don't know."
-    - followed by `Context:`
-    - followed by the context string
-    - followed by `Q: <query>`
-    - followed by `A:`
-  - Calls `self.client.interactions.create(model=..., input=prompt)`
-  - Returns `interaction.outputs[-1].text`
-
-#### Dependencies
-
-- `google.genai`
-- `os` is imported but unused
-- `typing` imports are unused
-
-### `backend/tests/run_validation.py`
-
-#### Purpose
-
-A manual retrieval validation script rather than a full automated test suite.
-
-#### What it does
-
-1. Adds the current working directory to `sys.path`
-2. Imports the backend modules directly
-3. Uses `backend/data/test_eval.pdf`
-4. Creates that PDF if missing by importing `backend.tests.create_test_pdf`
-5. Reads QA pairs from `backend.tests.eval_data`
-6. Runs ingestion, chunking, embedding, and retrieval
-7. Checks whether the top result page and expected text match each test case
-
-#### Important observation
-
-The repository snapshot analyzed here contains `backend/tests/run_validation.py`, but not the referenced:
-
-- `backend/tests/eval_data.py`
-- `backend/tests/create_test_pdf.py`
-
-So the validation script references support files that are not present in the current visible tree.
-
-### `backend/requirements.txt`
-
-Declares the main backend dependencies:
-
-- `fastapi`
-- `uvicorn`
-- `python-multipart`
-- `pymupdf`
-- `sentence-transformers`
-- `faiss-cpu`
-- `google-genai`
-- `numpy`
-- `pydantic`
-- `pytest`
-- `python-dotenv`
-
-### `backend/.env`
-
-Contains `GOOGLE_API_KEY` in plaintext form in the repository working tree.
-
-From an application behavior perspective:
-
-- `main.py` calls `load_dotenv()`
-- `AnswerGenerator` relies on environment-based authentication
-- The backend therefore expects this variable to exist before the first Gemini call
-
-## 4. Data Structures
-
-### Page document structure
-
-Produced by `PDFIngestor.extract_text_with_metadata()`:
-
-```python
-{
-    "text": "<full page text>",
-    "metadata": {
-        "source": "<uuid>.pdf",
-        "page": <1-based page>,
-        "total_pages": <total pages in source PDF>
-    }
-}
-```
-
-### Chunk structure
-
-Produced by `SemanticChunker.chunk_documents()`:
-
-```python
-{
-    "text": "<chunk text>",
-    "metadata": {
-        "source": "<uuid>.pdf",
-        "page": <1-based page>,
-        "total_pages": <total pages>,
-        "chunk_id": <global running integer>,
-        "sub_chunk_index": <0-based index inside the source page>
-    }
-}
-```
-
-### Embedding format
-
-- Type: NumPy array
-- Dtype used for FAISS insertion: `float32`
-- Batch shape: `(num_chunks, embedding_dimension)`
-- Query shape before search: reshaped to `(1, embedding_dimension)`
-
-### Retrieval result format
-
-Produced by `VectorStore.search()`:
-
-```python
-{
-    "text": "<chunk text>",
-    "metadata": {
-        "source": "...",
-        "page": ...,
-        "total_pages": ...,
-        "chunk_id": ...,
-        "sub_chunk_index": ...
-    },
-    "score": <float>,
-    "rank": <1-based rank among retained results>
-}
-```
-
-### FAISS index usage
-
-- Index type: `faiss.IndexFlatL2`
-- Storage mode: in-memory during runtime, binary on disk after `save()`
-- Persistence path: `backend/data/faiss_index.bin` relative to the process working directory
-- Matching metadata is stored separately in `backend/data/metadata.json`
-
-The metadata list order is the lookup bridge between FAISS vector row index and original chunk payload:
-
-- vector at row `i` in FAISS corresponds to `self.metadata[i]`
-
-### Metadata file format
-
-`metadata.json` is a JSON array where each element is a chunk object:
-
-```json
-[
-  {
-    "text": "...",
-    "metadata": {
-      "source": "0e697a9e-127b-437a-ad27-b88c217f4a63.pdf",
-      "page": 2,
-      "total_pages": 79,
-      "chunk_id": 1,
-      "sub_chunk_index": 0
-    }
-  }
-]
-```
-
-### Cache format
-
-`query_cache.json` is a JSON object:
-
-```json
-{
-  "md5(normalized_query)": "cached answer string"
-}
-```
-
-## 5. Retrieval System
-
-### How similarity search works
-
-The retrieval layer uses exact FAISS L2 distance search:
-
-1. Convert the query embedding to shape `(1, d)` and `float32`
-2. Ask FAISS for the `k` nearest vectors
-3. Receive:
-   - `distances`
-   - `indices`
-4. For each result:
-   - ignore `idx == -1`
-   - compute a custom similarity score from the FAISS distance
-   - keep only results whose score meets the threshold
-
-### Scoring mechanism
-
-FAISS returns squared L2 distances for `IndexFlatL2`.
-
-The application maps distance to a similarity-like value with:
-
-```python
-score = 1.0 / (1.0 + dist)
-```
-
-Properties of this mapping:
-
-- distance `0` maps to score `1.0`
-- larger distances move the score toward `0`
-- the mapping is monotonic but not cosine similarity
-- score meaning is application-defined, not a native FAISS confidence
-
-### Threshold behavior
-
-`VectorStore.search` defaults to `threshold=0.6`, but `/query` overrides it with `threshold=0.1`.
-
-So in live query handling:
-
-- top `k=3` neighbors are requested
-- anything with score below `0.1` is dropped
-
-Because the threshold is low, most practical filtering pressure comes from the top-k boundary rather than aggressive score filtering.
-
-### Ranking logic
-
-- FAISS returns nearest vectors in ascending distance order
-- The code iterates through that order
-- Retained results are appended sequentially
-- `rank` is assigned as `len(results) + 1`
-
-So the output rank is the order after threshold filtering, which generally still matches nearest-first ordering.
-
-### Retrieval logging
-
-Every search prints a scored retrieval log with:
-
-- rank
-- score
-- page
-- chunk ID
-- text preview
-
-This is useful for debugging relevance behavior manually from console output.
-
-## 6. Context Optimization
-
-### How context is built
-
-`ContextOptimizer.optimize_context()` converts retrieved chunks into a compact context string.
-
-The process is:
-
-1. Tokenize the query
-2. Split each retrieved chunk into sentences
-3. Compute sentence-query Jaccard relevance
-4. Add a small retrieval-score boost
-5. Sort all candidate sentences by score
-6. Remove highly overlapping sentences
-7. Stop when the estimated token budget is reached
-8. Reorder by page
-9. Concatenate into one context string with page markers
-
-### Sentence scoring
-
-For each sentence:
-
-- `score = Jaccard(query_tokens, sentence_tokens) + (chunk_score * 0.1)`
-
-This means lexical overlap with the query is the primary driver, while retrieval score only nudges the ranking.
-
-### Token limiting strategy
-
-- Budget source: `ContextOptimizer(token_limit=1500)` in `main.py`
-- Per-sentence estimate: `len(sentence_text) // 4`
-- The optimizer accumulates sentence estimates until adding another one would exceed the limit
-- When the next sentence would exceed the budget, selection stops immediately
-
-### Ordering and filtering
-
-Filtering stages:
-
-- sentences under 10 characters are dropped
-- near-duplicate sentences are dropped if token-set Jaccard overlap with a selected sentence exceeds `0.6`
-
-Ordering behavior:
-
-- selection order is relevance-first
-- final presentation order is page-first
-
-### Result format
-
-The final context is a single string similar to:
-
-```text
-[Page 3] Sentence one. Sentence two.
-[Page 4] Sentence three.
-```
-
-## 7. Caching System
-
-### How queries are normalized
-
-The cache normalizes a query with:
-
-```python
-query.strip().lower()
-```
-
-This removes leading and trailing whitespace and makes matching case-insensitive, but it does not:
-
-- collapse repeated internal whitespace
-- remove punctuation
-- stem words
-- canonicalize paraphrases
-
-### Cache storage format
-
-Storage key:
-
-- `md5(normalized_query.encode()).hexdigest()`
-
-Storage value:
-
-- answer string only
+Purpose:
+
+- persistent vector store
+- sparse keyword index
+- hybrid retrieval orchestration
+
+Core state:
+
+- `self.index`: FAISS `IndexFlatL2`
+- `self.metadata`: list of chunk payloads
+- `self.sparse_documents`: tokenized chunk representations for keyword retrieval
+- `self.document_frequencies`
+- `self.avg_document_length`
+- `self.reranker`
 
 Persistence:
 
-- in-memory dict during runtime
-- full JSON rewrite to `backend/data/query_cache.json` on every `set()` and `clear()`
+- default index path: `backend/data/faiss_index.bin`
+- default metadata path: `backend/data/metadata.json`
+- `load()` executes on initialization by default
+- missing files are handled safely by creating empty in-memory state
+
+Key methods:
+
+- `add_documents()`
+  - adds embeddings to FAISS
+  - appends chunk metadata
+  - rebuilds sparse keyword structures
+- `clear()`
+  - resets in-memory state only
+- `reset()`
+  - clears in-memory state and deletes persisted index and metadata files
+- `has_documents()`
+  - returns whether non-empty index and metadata are both present
+- `_dense_search()`
+  - runs FAISS L2 search
+  - converts distance to score as `1 / (1 + distance)`
+- `_keyword_search()`
+  - implements a BM25-style scorer over tokenized chunk text
+- `_fuse_results_rrf()`
+  - merges dense and keyword candidates with true Reciprocal Rank Fusion
+- `_apply_diversity()`
+  - removes highly overlapping candidates and tries to avoid redundant page concentration
+- `hybrid_search()`
+  - full retrieval pipeline entry point
 
-### Invalidation logic
+### `backend/app/reranking.py`
 
-The cache is invalidated only in one explicit place:
+Purpose:
 
-- after a successful `/upload`, `cache.clear()` is called
+- modular reranking layer
 
-That reflects the backend's one-document-at-a-time model. Cached answers from an older document are intentionally discarded whenever a new document is indexed.
+Structure:
 
-## 8. LLM Integration
+- `BaseReranker`
+- `HeuristicReranker`
+- `CrossEncoderReranker`
+- `build_default_reranker()`
 
-### How prompts are constructed
+Heuristic reranker:
 
-The prompt sent to Gemini is:
+- computes a weighted score from:
+  - dense score
+  - keyword score
+  - fusion score
+  - lexical overlap
+  - exact-phrase match
+
+Cross-encoder reranker:
+
+- lazy-loads `cross-encoder/ms-marco-MiniLM-L-6-v2`
+- scores query-chunk pairs with `CrossEncoder.predict()`
+- sigmoid-normalizes raw model scores
+- blends model score with heuristic score and fusion score
+- uses different blends for:
+  - summarization
+  - definition and fact lookup
+  - analytical queries
+
+Fallback behavior:
 
-```text
-Answer ONLY from context. If not found, say you don't know.
+- `VectorStore.hybrid_search()` catches reranker failures
+- reranking falls back to `HeuristicReranker`
+- telemetry records fallback reason and fallback reranker name
 
-Context:
-<optimized context>
+### `backend/app/optimization.py`
 
-Q: <user query>
-A:
-```
+Purpose:
 
-This is a plain string prompt, not a structured system/user message schema in the application code.
+- context compression without using an LLM
 
-### When the LLM is called
+Implementation:
 
-The LLM is called only if all of the following are true:
+- split chunk text into sentences
+- group adjacent short sentences for coherence
+- score sentence groups against the query
+- filter low-relevance sentence groups
+- deduplicate similar content
+- enforce an estimated token budget
 
-- cache miss
-- at least one retrieved chunk passes thresholding
-- query does not match the simple-query fast path
-- optimized context is non-empty and at least 10 stripped characters long
+Scoring inputs:
 
-Otherwise the system either:
+- query-to-sentence Jaccard overlap
+- chunk score
+- rerank score
+- cross-encoder score
+- summary cue token bonus for summarization queries
 
-- serves from cache
-- returns a direct extract
-- returns a no-context fallback
+Behavior details:
 
-### Current safeguards against misuse
+- uses a dynamic relevance floor
+- uses stricter floors for definition and fact lookup
+- uses more permissive floors for summarization
+- contains summarization-specific logic that tries to preserve at least one representative sentence from top chunks
 
-The implemented safeguards are lightweight:
+Return payload:
 
-- instruction to answer only from provided context
-- instruction to say "don't know" if context does not contain the answer
-- no LLM call at all when retrieval returns no relevant chunks
+- `context`
+- `selected_sentences`
+- `token_estimate`
+- `pages_used`
+- `relevance_floor`
+- `reasoning_summary`
 
-What is not present in the current code:
+### `backend/app/query_processing.py`
 
-- no moderation step
-- no explicit prompt-injection filtering on retrieved text
-- no output post-processing
-- no citation enforcement beyond returning `sources` separately in the API response
-- no retry or fallback model logic
+Purpose:
 
-## 9. Logging and Debugging
+- lightweight query intelligence layer
 
-### What is currently logged
+Classification:
 
-The backend uses `print(...)` statements rather than a logging framework.
+- `definition`
+- `fact_lookup`
+- `summarization`
+- `analytical`
 
-Observed log points include:
+Classification signals:
 
-- upload stage progress:
-  - extracting text
-  - chunking
-  - generating embeddings
-  - indexing
-- cache hits in `/query`
-- number of retrieved chunks
-- no-context short-circuit behavior
-- simple-query fast-path activation
-- final optimized context size estimate
-- "Calling LLM"
-- retrieval score logs from `VectorStore._log_retrieval`
+- prefix heuristics
+- keyword heuristics
+- short-query heuristic
+- default long-query fallback
 
-### How to trace execution
+Classification outputs:
 
-A practical trace order for a request is:
+- label
+- heuristic confidence
+- matched signals
 
-1. `main.py` route entry
-2. upload/query route-level prints
-3. `retrieval.py` scored retrieval log
-4. cache file, metadata file, and FAISS file on disk if persistence is relevant
+Rewriting:
 
-Useful runtime artifacts:
+- normalizes the raw query
+- applies a small set of hand-authored expansions for a few known queries
+- otherwise keeps rewriting intentionally lightweight
+- preserves natural phrasing more than earlier versions
 
-- uploaded PDFs under `backend/data/uploads`
-- FAISS binary file
-- metadata JSON
-- query cache JSON
+Query package fields:
 
-### Debugging characteristics
+- `original`
+- `normalized`
+- `rewritten`
+- `embedding_query`
+- `keyword_query`
+- `query_type`
+- `classification_confidence`
+- `classification_signals`
+- `force_full_rag`
+- `variants`
+- `should_prefer_direct_answer`
 
-- The code is easy to follow because orchestration is explicit and linear.
-- There is very little hidden abstraction.
-- Failures from external libraries will mostly surface directly because exception handling is minimal.
+Important nuance:
 
-## 10. Current Limitations
+- `embedding_query` is typically the raw query now
+- only a small number of expansion overrides use an alternative embedding query
+- `keyword_query` is always the raw user query
 
-This section describes limitations and weak points visible in the current implementation. It is descriptive, not prescriptive.
+### `backend/app/cache.py`
 
-### Single-document operating model
+Purpose:
 
-- `/upload` clears the existing vector store before indexing the new file.
-- The backend therefore behaves as a one-upload-at-a-time system, not a multi-document knowledge base.
-- Existing persisted data is overwritten by the next upload.
+- disk-backed exact and semantic response cache
 
-### Persistence is incomplete on startup
+Storage:
 
-- `VectorStore.save()` exists and persists state to disk.
-- `VectorStore.load()` also exists.
-- `main.py` never calls `vector_store.load()`.
-- As a result, persisted index/metadata files are not automatically reloaded when the API process starts.
-- Query behavior after restart depends on whatever is currently in memory, which starts as an empty FAISS index and empty metadata list.
+- default path: `backend/data/query_cache.json`
 
-### Working-directory-sensitive file paths
+Normalization:
 
-- Most paths are written as `backend/data/...`.
-- If the server is launched from the repository root, those paths resolve to `C:\\builds\\liteRAG\\backend\\data\\...`.
-- If the server is launched from the `backend` directory as suggested in the README, those same paths resolve to `C:\\builds\\liteRAG\\backend\\backend\\data\\...`.
-- The analyzed repository already contains data under `backend/backend/data`, which shows this path dependency in practice.
-- This means runtime storage location depends on the current working directory.
+- lowercase
+- strip punctuation
+- collapse whitespace
 
-### Monkey-patched vector-store clearing
+Exact cache:
 
-- `VectorStore.clear` is added dynamically in `main.py` instead of being defined in `retrieval.py`.
-- The `/upload` flow then also resets `metadata` and recreates the FAISS index again immediately afterward.
-- Clearing behavior is therefore split and partially duplicated across files.
+- key is MD5 hash of normalized query
 
-### Minimal file validation
+Semantic cache:
 
-- `/upload` only checks whether the filename ends with `.pdf`.
-- The code does not verify MIME type or actual file content before attempting extraction.
+- requires a query embedding at lookup time
+- computes cosine similarity against stored query embeddings
+- ignores cached responses whose stored confidence level is `low`
+- default similarity threshold is `0.9`
+- analytical answers require `>= 0.94`
 
-### No defensive error handling around major external operations
+Cached payloads can include:
 
-- PDF parsing errors from PyMuPDF are not caught in the route.
-- Embedding model failures are not caught.
-- FAISS write errors are not caught.
-- Gemini API errors are not caught.
-- Cache JSON write failures are not caught.
+- `answer`
+- `sources`
+- `confidence`
+- `reasoning_summary`
+- `pages_referenced`
+- `query_type`
+- `normalized_query`
+- `query_embedding`
 
-### Retrieval score semantics are heuristic
+### `backend/app/generation.py`
 
-- FAISS returns squared L2 distance.
-- The backend converts that to a score with `1 / (1 + dist)`.
-- This is a custom transformation, not a calibrated relevance probability.
-- Threshold tuning therefore depends on empirical behavior rather than a standardized similarity metric.
+Purpose:
 
-### Chunking is simple and page-bound
+- Gemini answer generation wrapper
 
-- Chunking uses whitespace word windows only.
-- It does not preserve sentence boundaries.
-- It does not use headings, layout, section structure, or semantic boundaries.
-- Chunking is performed independently per page, so content spanning page boundaries is not merged.
+Implementation:
 
-### Context optimizer is lexical and approximate
+- uses `google.genai.Client()`
+- default model name: `gemini-3-flash-preview`
+- creates a single prompt with:
+  - a strict grounding instruction
+  - the compressed context
+  - the user question
 
-- Relevance is based on Jaccard overlap over token sets.
-- Token budget is estimated by `characters // 4`, not model-token counting.
-- Sentence splitting is regex-based and can be brittle for abbreviations or unusual formatting.
-- Final ordering by page may reduce pure relevance ordering in favor of document order.
+Prompt safeguards:
 
-### Cache stores only answer strings
+- answer only from context
+- say you do not know if context is insufficient
+- avoid invented facts or interpretations
+- cite page markers if useful
 
-- Cached responses omit retrieval sources in the cache payload.
-- When cache hits occur, the API returns only `answer` and `cached: True`.
-- Cached answers are therefore detached from the source context that originally produced them.
+### `backend/app/logging_utils.py`
 
-### Simple-query path bypasses generation safeguards
+Purpose:
 
-- Queries matching the simple-prefix rule return the top chunk text directly.
-- This path bypasses answer synthesis and any LLM-level instruction following.
-- The returned text may therefore be longer, less focused, or less directly responsive than the LLM path.
+- structured JSON logging
 
-### Logging is unstructured
+Behavior:
 
-- The service uses `print(...)` statements.
-- There are no log levels, request IDs, structured fields, or centralized logger configuration.
-- Traceability exists, but only as console text.
+- prints one JSON object per event
+- includes UTC timestamp and event name
+- used throughout upload, query, retrieval, context optimization, and completion paths
 
-### Test surface is incomplete in the analyzed tree
+## 4. Retrieval System
 
-- `run_validation.py` references `backend.tests.eval_data` and `backend.tests.create_test_pdf`.
-- Those files were not present in the visible repository snapshot analyzed here.
-- The visible automated validation surface is therefore incomplete.
+### Hybrid retrieval design
 
-### Sensitive configuration is stored in-repo
+The retrieval system has two first-stage retrieval channels:
 
-- The checked-in working tree contains a plaintext `GOOGLE_API_KEY` in `backend/.env`.
-- From a backend audit perspective, this is a security-sensitive operational characteristic of the current repository state.
+- dense retrieval from FAISS over chunk embeddings
+- keyword retrieval from a BM25-style sparse scorer
 
-## 11. Operational Notes and Runtime Assumptions
+Both operate over the same chunk inventory.
 
-### Startup assumptions
+### RRF implementation
 
-- The sentence-transformers model can be loaded successfully at import time
-- FAISS is available locally
-- A valid Google API key is available before generation
-- The process has write access to the resolved `backend/data/...` paths
+Fusion uses true Reciprocal Rank Fusion:
 
-### In-memory vs persisted state
+- dense contribution: `1 / (k + dense_rank)`
+- keyword contribution: `1 / (k + keyword_rank)`
+- `k` is fixed at `60`
+- fused score is the sum of both reciprocal rank contributions
 
-In-memory state used during requests:
+This means:
 
-- embedding model object
-- FAISS index object
-- metadata list
-- cache dict
-- Gemini client
+- fusion depends on ranks, not raw score interpolation
+- dense and keyword systems contribute symmetrically at fusion time
 
-Persisted state written by the backend:
+### Reranking pipeline
 
-- uploaded PDF binaries
-- FAISS binary index
-- metadata JSON
-- query cache JSON
+After fusion:
 
-### Observable API behavior summary
+1. candidates are reranked by the configured reranker
+2. the default reranker is `CrossEncoderReranker`
+3. reranking can fall back to `HeuristicReranker`
+4. telemetry records full decision logs
 
-`POST /upload`
+The cross-encoder is query-type aware:
 
-- accepts only files whose names end with `.pdf`
-- stores the uploaded file
-- extracts text, chunks, embeds, indexes, persists, clears cache
-- returns success message, file ID, and page count
+- summarization does not trust the cross-encoder as heavily
+- definition and fact lookup weight the cross-encoder more aggressively
+- analytical queries use a blended model-plus-heuristic score
 
-`POST /query`
+### Diversity and filtering logic
 
-- checks cache first
-- embeds query
-- retrieves top 3 chunks above threshold 0.1
-- returns a fallback if nothing relevant is found
-- returns a direct extract for certain short definitional queries
-- otherwise compresses context and calls Gemini
-- caches the final answer
+Current filtering is adaptive rather than purely absolute:
 
-## 12. Source-of-Truth Summary
+- compute max rerank score among reranked candidates
+- keep candidates whose rerank score is at least `60%` of the top rerank score
+- also allow candidates through with query-type specific absolute thresholds over rerank, cross-encoder, dense, or keyword evidence
 
-The current backend is a compact, linear RAG implementation optimized for simplicity over breadth. Its behavior is best understood as:
+Current absolute fallback rules:
 
-- page text extraction with PyMuPDF
-- overlapping word-window chunking
-- local sentence-transformer embeddings
-- exact FAISS L2 retrieval
-- heuristic sentence-level context compression
-- optional Gemini generation
-- exact-match answer caching
-- single-upload corpus replacement
+- summarization can pass with:
+  - rerank score
+  - keyword plus dense support
+  - heuristic score
+- other query types can pass with:
+  - relative rerank threshold
+  - cross-encoder score
+  - rerank score
+  - dense plus keyword support
 
-That combination makes the codebase easy to read and trace, but it also means system behavior depends heavily on process working directory, import-time initialization, and the currently loaded in-memory document state.
+Diversity logic then:
+
+- removes highly overlapping candidates
+- discourages early overconcentration from the same page
+
+### Soft fallback mode
+
+If strict filtering returns no final candidates but reranked candidates exist:
+
+- the system marks `soft_fallback_used = True`
+- it selects the top `1` fallback candidate for definition and fact lookup
+- it selects the top `2` fallback candidates for other query types
+- confidence is later forced down to `low`
+
+This is the main recall-oriented fallback in the current implementation.
+
+## 5. Context Optimization
+
+### Sentence grouping
+
+The optimizer:
+
+- splits chunk text into sentences
+- groups adjacent short sentences together to reduce fragmentation
+- preserves page markers in the final context string
+
+### Relevance filtering
+
+Sentence groups are scored using:
+
+- Jaccard overlap with query tokens
+- chunk-level score boost
+- rerank score boost
+- cross-encoder score boost
+- summarization cue-token bonus for summarization queries
+
+Then:
+
+- sentence groups below a dynamic relevance floor are dropped
+- groups with more than `0.6` token overlap against already selected groups are removed as redundant
+
+### Token budgeting
+
+- token budget is estimated as `len(text) // 4`
+- global optimizer budget is `800`
+- summarization logic may force inclusion of representative top-chunk sentences even after the first selection pass
+
+### Weak-context fallback
+
+If the optimized context is empty or too short but retrieval did produce candidates:
+
+- `main.py` creates a weak fallback context from the top retrieved chunk(s)
+- this fallback context is not sentence-selected
+- it is marked as low-confidence by control flow
+
+## 6. Query Intelligence Layer
+
+### Query classification
+
+Classification is heuristic, not model-based.
+
+Decision patterns:
+
+- prefix-based detection for definitions and fact lookups
+- keyword detection for summarization and analytical queries
+- short-query heuristic for very short queries
+- default-long-query fallback otherwise
+
+### Query rewriting
+
+Current rewriting is intentionally lighter than earlier phases.
+
+Behavior:
+
+- preserve the raw query for keyword retrieval
+- usually preserve the raw query for embedding generation
+- apply a tiny set of hardcoded expansions only for a few recognized normalized forms
+- otherwise append only minimal hints such as `meaning` or `summary`
+
+### Adaptive behavior
+
+The query package affects downstream control flow:
+
+- `query_type` shapes reranking, thresholding, and context optimization
+- `classification_confidence` controls `force_full_rag`
+- `should_prefer_direct_answer` enables a direct extract path for some simple, high-confidence factual questions
+
+## 7. Confidence System
+
+### How confidence is computed
+
+Confidence is computed in `main.py` from retrieved chunks, not from the LLM.
+
+For non-summarization queries the combined score uses:
+
+- max rerank score
+- average rerank score
+- max cross-encoder score
+- score gap between top two candidates
+- lexical support between query and chunk text
+- consistency, defined as `1 - score_spread`
+- source count factor
+
+For summarization queries the combined score shifts toward:
+
+- average rerank score
+- dense support
+- keyword support
+- lexical support
+- consistency
+- source count factor
+
+Returned confidence fields:
+
+- `level`
+- `score`
+- `max_score`
+- `avg_score`
+- `max_cross_encoder_score`
+- `score_gap`
+- `consistency`
+- `lexical_support`
+- `sources`
+
+### How confidence affects control flow
+
+- `soft_fallback_used` forces confidence down to `low`
+- direct extract requires `high` confidence and sufficiently strong cross-encoder support
+- low-confidence answers are prefixed with uncertainty text
+- current `should_skip_llm()` logic is permissive for low-confidence contexts if minimal weak-context token budget exists
+- because of that, low-confidence retrieved contexts can still reach Gemini
+
+This is one reason the system now has higher recall but weaker refusal behavior in the current validation results.
+
+## 8. Caching System
+
+### Exact vs semantic cache
+
+Exact cache:
+
+- normalized query -> MD5 hash -> payload
+
+Semantic cache:
+
+- compares query embedding to cached query embeddings with cosine similarity
+- ignores low-confidence cached answers
+- requires strong similarity threshold
+
+Thresholds:
+
+- default semantic threshold: `0.9`
+- analytical semantic threshold: `0.94`
+
+### Safety constraints
+
+- low-confidence cached answers are skipped for semantic reuse
+- cache is cleared on each upload
+- cache entries are response payloads, not just raw strings
+
+## 9. Validation & Evaluation Layer
+
+### Dataset structure
+
+The validation layer lives under `backend/tests` and includes:
+
+- `create_test_pdf.py`
+  - generates a deterministic 7-page synthetic PDF corpus
+- `eval_data.py`
+  - defines labeled evaluation cases
+- `run_validation.py`
+  - builds an isolated runtime, indexes the synthetic corpus, runs queries, computes metrics, and writes a report
+
+Each evaluation case includes:
+
+- `id`
+- `category`
+- `query`
+- `expected_answer`
+- `required_phrases`
+- `forbidden_phrases`
+- `relevant_pages`
+- `relevant_snippets`
+- `min_relevant_pages_returned`
+- `should_call_llm`
+- `should_succeed`
+
+Categories currently include:
+
+- definition
+- fact lookup
+- analytical
+- summarization
+- multi-hop
+- ambiguous
+- adversarial
+- negative
+
+### Evaluation pipeline
+
+`run_validation.py`:
+
+1. creates or refreshes the synthetic PDF
+2. swaps in isolated vector store, cache, and stub generator instances
+3. ingests the synthetic corpus
+4. warms the reranker once to measure cold-start cost separately
+5. runs retrieval telemetry and full `query_document()` execution for each case
+6. computes ground-truth retrieval metrics and answer correctness
+7. writes a JSON report to `backend/tests/artifacts/validation_report.json`
+
+### Metrics
+
+True metrics:
+
+- `precision@k`
+- `recall@k`
+- `MRR`
+- answer accuracy
+- retrieval grounding accuracy
+
+Proxy metrics:
+
+- `retrieval_metrics` produced inside `VectorStore._compute_retrieval_metrics()`
+
+Important distinction:
+
+- proxy metrics are heuristic and based on internal overlap rules
+- true metrics are computed against labeled pages or chunks from the validation set
+
+### Current measured results
+
+The latest rerun of `python -m backend.tests.run_validation` on April 12, 2026 produced:
+
+- `total_cases`: `13`
+- `answer_accuracy`: `0.3077`
+- `retrieval_grounding_accuracy`: `0.3846`
+- `avg_true_precision_at_k`: `0.6154`
+- `avg_true_recall_at_k`: `0.7436`
+- `avg_true_mrr`: `0.7179`
+- `avg_proxy_precision_at_k`: `1.0`
+
+Interpretation:
+
+- retrieval recall is materially higher than answer accuracy
+- proxy retrieval precision remains overly optimistic
+- recent recall-oriented fallback behavior improved retrieval coverage but degraded refusal behavior and evaluation accuracy
+
+### Validation harness caveat
+
+`run_validation.py` performs a separate direct retrieval call before calling `query_document()`, and that direct retrieval still uses:
+
+- `retrieval_query = rewritten or normalized or raw`
+- `retrieval_text = " ".join(variants)`
+
+`query_document()` no longer uses exactly the same query text strategy. The harness remains useful, but its preflight retrieval telemetry is not perfectly identical to the live query path.
+
+## 10. Performance & Observability
+
+### Latency tracking
+
+Retrieval telemetry records per-stage latency:
+
+- dense search
+- keyword search
+- fusion
+- rerank
+- final selection
+- overall retrieval latency
+
+Validation also records:
+
+- end-to-end query latency
+- retrieval latency
+- rerank warmup latency
+
+### Current reranker latency profile
+
+Latest validation summary:
+
+- `avg_rerank_latency_ms`: `96.52`
+- `max_rerank_latency_ms`: `127.42`
+- `reranker_warmup_ms`: `4481.12`
+
+This reflects a significant cold-start cost for the cross-encoder and much lower steady-state latency afterward.
+
+### Token estimation
+
+- context token estimate is heuristic: characters divided by four
+- latest validation average token estimate: `88.31`
+
+### LLM call frequency
+
+Latest validation summary:
+
+- `llm_call_frequency`: `0.6154`
+- `llm_calls_total`: `12`
+
+This is elevated by the current low-confidence fallback behavior, which now allows Gemini calls in some borderline contexts that previously would have been refused.
+
+### Observability events
+
+Important logged events include:
+
+- `upload_started`
+- `upload_indexed`
+- `query_cache_hit`
+- `query_retrieval_complete`
+- `retrieval_evaluation`
+- `context_optimized`
+- `query_skipped_llm`
+- `query_completed`
+
+## 11. Failure Modes & Safeguards
+
+### No-context handling
+
+If retrieval returns no candidates:
+
+- the system returns an explicit no-context answer
+- Gemini is not called
+
+### Low-confidence behavior
+
+Current behavior is mixed:
+
+- low-confidence answers are explicitly labeled
+- weak fallback context is allowed to reach Gemini
+- the system can therefore return cautious but still content-bearing low-confidence answers
+
+### Adversarial handling
+
+The prompt tells Gemini to answer only from context, but there is no dedicated adversarial classifier.
+
+Current code behavior:
+
+- adversarial queries can retrieve adversarial-policy text from the indexed document
+- once that text is retrieved, Gemini can still answer from it instead of refusing
+- current validation confirms this is an active weakness
+
+### Cache safety
+
+- semantic cache ignores low-confidence stored responses
+- analytical semantic cache hits require stronger similarity
+
+### Persistence safety
+
+- vector store load handles missing files safely
+- reset removes index and metadata files
+- cache is stored separately and cleared on upload and reset
+
+## 12. Current Limitations
+
+### Multi-hop reasoning gaps
+
+- the retrieval system can find relevant multi-page evidence, but answer composition often fails to synthesize it fully
+- validation shows multi-hop answer failures even when retrieval recall is strong
+
+### Summarization weaknesses
+
+- summarization reranking still overweights pages 4, 6, and 7 for the current synthetic benchmark
+- the page containing explicit workflow recommendations is often under-selected or not preserved into final grounded output
+
+### Latency tradeoffs
+
+- cross-encoder cold start is expensive
+- every query currently reranks candidates, so steady-state latency is dominated by the reranker rather than by FAISS or BM25
+
+### Evaluation limitations
+
+- the synthetic benchmark is still small
+- the generated PDF corpus is deterministic and narrow
+- the harness is helpful for regression testing but is not a real-world benchmark
+- the harness contains a slight query-path mismatch before `query_document()` executes
+
+### Precision vs recall tension
+
+- recent recall-oriented changes intentionally relaxed filtering
+- as a result, negative, ambiguous, and adversarial queries now perform worse in validation
+- the system currently prefers partial grounded answers over outright refusal in more cases than before
+
+### Direct-answer path inconsistency
+
+- definition queries can still take a direct extract path when confidence is high
+- fact lookup currently often falls through to Gemini even when validation expects no LLM call
+- validation marks that as `unexpected_llm_usage`
+
+### Single-corpus limitation
+
+- upload replaces the active corpus
+- there is no multi-document index, corpus namespace, or document-level filtering across many uploaded files
+
+## Closing Summary
+
+The current backend is a persisted, single-corpus, multi-stage RAG system with hybrid retrieval, RRF fusion, modular reranking, sentence-level context compression, confidence-aware control flow, semantic caching, and a labeled validation harness. Its strongest area is retrieval recall over a small indexed corpus. Its weakest areas are refusal behavior, summarization selection, multi-hop synthesis, and the current precision-recall balance introduced by recall-oriented soft fallback behavior.
