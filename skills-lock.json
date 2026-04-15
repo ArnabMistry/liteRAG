@@ -6,6 +6,11 @@
       "sourceType": "github",
       "computedHash": "18b4f9dca7aa13d0f65938ed926c7865d635d74c58ea60291e313722f1d3a9dd"
     },
+    "caveman-distillate": {
+      "source": "dlepold/caveman-distillate",
+      "sourceType": "github",
+      "computedHash": "1f957218e89c3314dc33603c81557decef4987d9cf78d8150fa642894f1afeb4"
+    },
     "find-skills": {
       "source": "vercel-labs/skills",
       "sourceType": "github",

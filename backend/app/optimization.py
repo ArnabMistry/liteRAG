@@ -49,6 +49,31 @@ class ContextOptimizer:
 
         return groups
 
+    def _format_distilled_context(self, chunk: Dict) -> str:
+        distilled = chunk.get("distilled") or {}
+        if not isinstance(distilled, dict):
+            return ""
+
+        parts = []
+        summary = distilled.get("s")
+        if isinstance(summary, str) and summary.strip():
+            parts.append(summary.strip())
+
+        concepts = distilled.get("c") or []
+        formatted_concepts = []
+        for concept in concepts:
+            if not isinstance(concept, list) or len(concept) != 3:
+                continue
+
+            subject, relation, obj = (str(part).strip() for part in concept)
+            if subject and relation and obj:
+                formatted_concepts.append(f"{subject} {relation} {obj}")
+
+        if formatted_concepts:
+            parts.append(f"Concepts: {'; '.join(formatted_concepts)}.")
+
+        return " ".join(parts).strip()
+
     def build_context_package(self, query: str, retrieved_chunks: List[Dict], query_type: str = "analytical") -> Dict:
         query_tokens = self._tokenize(query)
         
@@ -57,7 +82,8 @@ class ContextOptimizer:
         for chunk in retrieved_chunks:
             page = chunk['metadata'].get('page', '?')
             # Clean text and split into sentences
-            text = chunk.get("text", "").replace("\n", " ").strip()
+            text_source = self._format_distilled_context(chunk) or chunk.get("text", "")
+            text = text_source.replace("\n", " ").strip()
             sentences = self._split_sentences(text)
             sentence_groups = self._build_sentence_groups(sentences)
             

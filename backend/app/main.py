@@ -1,6 +1,8 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import json
 import shutil
 import os
 import uuid
@@ -10,11 +12,13 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 UPLOAD_DIR = DATA_DIR / "uploads"
+KNOWLEDGE_ARTIFACT_PATH = DATA_DIR / "knowledge_artifact.json"
 
 load_dotenv(BASE_DIR / ".env")
 
 from app.ingestion import PDFIngestor
 from app.chunking import SemanticChunker
+from app.distillation import DistillationEngine
 from app.embeddings import EmbeddingEngine
 from app.retrieval import VectorStore
 from app.optimization import ContextOptimizer
@@ -204,6 +208,30 @@ def build_direct_answer(query_type: str, context_package: dict, retrieved_chunks
     return f"(Direct Extract) {top_chunk_text}".strip()
 
 
+def format_distilled_context(chunk: dict) -> str:
+    distilled = chunk.get("distilled") or {}
+    if not isinstance(distilled, dict):
+        return ""
+
+    parts = []
+    summary = distilled.get("s")
+    if isinstance(summary, str) and summary.strip():
+        parts.append(summary.strip())
+
+    concepts = distilled.get("c") or []
+    formatted_concepts = []
+    for concept in concepts:
+        if isinstance(concept, list) and len(concept) == 3:
+            subject, relation, obj = (str(part).strip() for part in concept)
+            if subject and relation and obj:
+                formatted_concepts.append(f"{subject} {relation} {obj}")
+
+    if formatted_concepts:
+        parts.append(f"Concepts: {'; '.join(formatted_concepts)}.")
+
+    return " ".join(parts).strip()
+
+
 def build_weak_context_package(retrieved_chunks, query_type: str) -> dict:
     fallback_k = 1 if query_type in {"definition", "fact_lookup"} else 2
     fallback_chunks = retrieved_chunks[:fallback_k]
@@ -211,7 +239,7 @@ def build_weak_context_package(retrieved_chunks, query_type: str) -> dict:
     fragments = []
     for chunk in fallback_chunks:
         page = chunk.get("metadata", {}).get("page")
-        text = chunk.get("text", "").strip()
+        text = format_distilled_context(chunk) or chunk.get("text", "").strip()
         if page is not None:
             pages.append(page)
             fragments.append(f"[Page {page}] {text}")
@@ -231,6 +259,30 @@ def build_weak_context_package(retrieved_chunks, query_type: str) -> dict:
         ),
     }
 
+
+def write_knowledge_artifact(file_id: str, chunks) -> None:
+    artifact = {
+        "file_id": file_id,
+        "total_chunks": len(chunks),
+        "chunks": [
+            {
+                "id": i,
+                "page": chunk.get("metadata", {}).get("page"),
+                "distilled": chunk.get("distilled", {}),
+            }
+            for i, chunk in enumerate(chunks)
+        ],
+    }
+
+    KNOWLEDGE_ARTIFACT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(KNOWLEDGE_ARTIFACT_PATH, "w", encoding="utf-8") as f:
+        json.dump(artifact, f, indent=2)
+
+
+def clear_knowledge_artifact() -> None:
+    if KNOWLEDGE_ARTIFACT_PATH.exists():
+        KNOWLEDGE_ARTIFACT_PATH.unlink()
+
 @app.get("/status")
 async def get_status():
     is_indexed = vector_store.has_documents()
@@ -248,10 +300,22 @@ async def reset_session():
     try:
         vector_store.reset()
         cache.clear()
+        clear_knowledge_artifact()
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Failed to reset session state.") from exc
 
     return {"message": "Session reset successfully", "indexed": False}
+
+@app.get("/export")
+def export_knowledge():
+    if not KNOWLEDGE_ARTIFACT_PATH.exists():
+        raise HTTPException(status_code=404, detail="No artifact found")
+
+    return FileResponse(
+        KNOWLEDGE_ARTIFACT_PATH,
+        media_type="application/json",
+        filename="knowledge_artifact.json",
+    )
 
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
@@ -279,6 +343,15 @@ async def upload_pdf(file: UploadFile = File(...)):
     print(f"[{file_id}] Stage: Chunking...")
     chunker = SemanticChunker()
     chunks = chunker.chunk_documents(docs)
+
+    print(f"[{file_id}] Stage: Distilling chunks...")
+    distiller = DistillationEngine()
+    for chunk in chunks:
+        try:
+            chunk["distilled"] = distiller.distill_chunk(chunk.get("text", ""))
+        except Exception:
+            chunk["distilled"] = {"s": "", "k": [], "c": []}
+    log_event("upload_distilled", file_id=file_id, chunks=len(chunks))
     
     print(f"[{file_id}] Stage: Generating embeddings...")
     try:
@@ -289,9 +362,11 @@ async def upload_pdf(file: UploadFile = File(...)):
     
     print(f"[{file_id}] Stage: Indexing...")
     try:
+        clear_knowledge_artifact()
         vector_store.clear()
         vector_store.add_documents(embeddings, chunks)
         vector_store.save()
+        write_knowledge_artifact(file_id, chunks)
         log_event("upload_indexed", file_id=file_id, pages=len(docs), chunks=len(chunks))
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Failed to index document.") from exc

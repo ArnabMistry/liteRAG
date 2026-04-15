@@ -109,6 +109,7 @@ class VectorStore:
             results.append({
                 "text": match["text"],
                 "metadata": match["metadata"],
+                "distilled": match.get("distilled", {}),
                 "dense_score": dense_score,
                 "vector_distance": float(dist),
                 "dense_rank": rank,
@@ -155,6 +156,7 @@ class VectorStore:
             scored.append({
                 "text": match["text"],
                 "metadata": match["metadata"],
+                "distilled": match.get("distilled", {}),
                 "keyword_score": float(score),
                 "keyword_rank": 0,
             })
