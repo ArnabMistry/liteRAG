@@ -261,8 +261,13 @@ def build_weak_context_package(retrieved_chunks, query_type: str) -> dict:
 
 
 def write_knowledge_artifact(file_id: str, chunks) -> None:
+    original_size = None
+    if chunks:
+        original_size = chunks[0].get("metadata", {}).get("original_size")
+
     artifact = {
         "file_id": file_id,
+        "original_size": original_size,
         "total_chunks": len(chunks),
         "chunks": [
             {
@@ -282,6 +287,31 @@ def write_knowledge_artifact(file_id: str, chunks) -> None:
 def clear_knowledge_artifact() -> None:
     if KNOWLEDGE_ARTIFACT_PATH.exists():
         KNOWLEDGE_ARTIFACT_PATH.unlink()
+
+
+def get_artifact_status_payload() -> dict:
+    if not KNOWLEDGE_ARTIFACT_PATH.exists():
+        return {
+            "ready": False,
+            "artifact_path": KNOWLEDGE_ARTIFACT_PATH.name,
+            "artifact_size": 0,
+            "original_size": 0,
+            "file_id": None,
+        }
+
+    try:
+        with open(KNOWLEDGE_ARTIFACT_PATH, "r", encoding="utf-8") as f:
+            artifact = json.load(f)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Failed to read artifact metadata.") from exc
+
+    return {
+        "ready": True,
+        "artifact_path": KNOWLEDGE_ARTIFACT_PATH.name,
+        "artifact_size": KNOWLEDGE_ARTIFACT_PATH.stat().st_size,
+        "original_size": artifact.get("original_size") or 0,
+        "file_id": artifact.get("file_id"),
+    }
 
 @app.get("/status")
 async def get_status():
@@ -305,6 +335,11 @@ async def reset_session():
         raise HTTPException(status_code=500, detail="Failed to reset session state.") from exc
 
     return {"message": "Session reset successfully", "indexed": False}
+
+
+@app.get("/artifact/status")
+async def artifact_status():
+    return get_artifact_status_payload()
 
 @app.get("/export")
 def export_knowledge():
@@ -346,7 +381,10 @@ async def upload_pdf(file: UploadFile = File(...)):
 
     print(f"[{file_id}] Stage: Distilling chunks...")
     distiller = DistillationEngine()
+    original_size = file_path.stat().st_size
     for chunk in chunks:
+        chunk.setdefault("metadata", {})
+        chunk["metadata"]["original_size"] = original_size
         try:
             chunk["distilled"] = distiller.distill_chunk(chunk.get("text", ""))
         except Exception:

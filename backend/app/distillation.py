@@ -38,7 +38,7 @@ class DistillationEngine:
         "perceived", "often", "usually", "generally", "make", "makes", "made",
         "otherwise", "even", "demo", "demos", "think", "thinks", "thought",
         "ask", "asks", "take", "takes", "live", "lives", "detail", "details",
-        "regret", "regrets",
+        "regret", "regrets", "like", "general", "self",
     }
 
     GENERIC_SUMMARY_TERMS = {
@@ -64,9 +64,9 @@ class DistillationEngine:
     }
 
     CONCEPT_SENTENCE_CUES = {
-        "is", "are", "was", "were", "causes", "cause", "caused", "improves",
-        "improve", "improved", "requires", "require", "required", "depends",
-        "lead", "leads",
+        "is", "are", "was", "were", "enables", "enable", "enabled",
+        "improves", "improve", "improved", "drives", "drive", "driven",
+        "lead", "leads", "dominates", "dominate", "dominated",
     }
 
     ENTITY_PREFIX_FILLER = {
@@ -86,27 +86,28 @@ class DistillationEngine:
         "are": "is",
         "was": "is",
         "were": "is",
-        "causes": "causes",
-        "cause": "causes",
-        "caused": "causes",
+        "enables": "enables",
+        "enable": "enables",
+        "enabled": "enables",
         "improves": "improves",
         "improve": "improves",
         "improved": "improves",
-        "depends on": "depends_on",
-        "depend on": "depends_on",
+        "drives": "drives",
+        "drive": "drives",
+        "driven": "drives",
         "leads to": "leads_to",
         "lead to": "leads_to",
-        "requires": "requires",
-        "require": "requires",
-        "required": "requires",
+        "dominates": "dominates",
+        "dominate": "dominates",
+        "dominated": "dominates",
     }
 
     RELATION_PATTERNS = [
-        re.compile(r"\b(?P<subject>[^.;!?]{3,80}?)\s+(?P<relation>depends on|depend on)\s+(?P<object>[^.;!?]{3,90})$", re.IGNORECASE),
         re.compile(r"\b(?P<subject>[^.;!?]{3,80}?)\s+(?P<relation>leads to|lead to)\s+(?P<object>[^.;!?]{3,90})$", re.IGNORECASE),
-        re.compile(r"\b(?P<subject>[^.;!?]{3,80}?)\s+(?P<relation>causes|cause|caused)\s+(?P<object>[^.;!?]{3,90})$", re.IGNORECASE),
+        re.compile(r"\b(?P<subject>[^.;!?]{3,80}?)\s+(?P<relation>enables|enable|enabled)\s+(?P<object>[^.;!?]{3,90})$", re.IGNORECASE),
         re.compile(r"\b(?P<subject>[^.;!?]{3,80}?)\s+(?P<relation>improves|improve|improved)\s+(?P<object>[^.;!?]{3,90})$", re.IGNORECASE),
-        re.compile(r"\b(?P<subject>[^.;!?]{3,80}?)\s+(?P<relation>requires|require|required)\s+(?P<object>[^.;!?]{3,90})$", re.IGNORECASE),
+        re.compile(r"\b(?P<subject>[^.;!?]{3,80}?)\s+(?P<relation>drives|drive|driven)\s+(?P<object>[^.;!?]{3,90})$", re.IGNORECASE),
+        re.compile(r"\b(?P<subject>[^.;!?]{3,80}?)\s+(?P<relation>dominates|dominate|dominated)\s+(?P<object>[^.;!?]{3,90})$", re.IGNORECASE),
         re.compile(r"\b(?P<subject>[^.;!?]{3,80}?)\s+(?P<relation>is|are|was|were)\s+(?P<object>[^.;!?]{3,90})$", re.IGNORECASE),
     ]
 
@@ -167,8 +168,11 @@ class DistillationEngine:
             summary = self._meaning_fallback_summary(cleaned_text, keywords)
             scores["summary_score"] = self._score_summary(summary, keywords)
         if not self._summary_has_meaning(summary):
-            summary = self._meaning_fallback_summary(cleaned_text, keywords)
+            summary = None
             scores["summary_score"] = self._score_summary(summary, keywords)
+        if summary is None and not concepts:
+            keywords = []
+            scores["keyword_score"] = 0
         summary = self._capitalize_sentence(summary)
 
         return {
@@ -291,43 +295,11 @@ class DistillationEngine:
         return self._ensure_sentence_boundary(cleaned)
 
     def _meaning_fallback_summary(self, text: str, keywords: List[str]) -> str:
-        inferred = self._infer_meaning_from_terms(text, keywords)
-        if inferred:
-            return inferred
-
         original = self._best_clean_original_sentence(text)
         if original:
             return original
 
-        return self._minimal_meaning_sentence(text)
-
-    def _infer_meaning_from_terms(self, text: str, keywords: List[str]) -> str:
-        lower = text.lower()
-        terms = set(keywords or self._keywords(text))
-        tokens = set(self._word_tokens(text))
-        signals = terms.union(tokens)
-
-        if "equation" in signals and {"thinking", "reading", "life"}.intersection(signals):
-            return "Thinking requires more than equations."
-        if {"thinking", "thoughts", "mind"}.intersection(signals) and {"life", "decisions", "decision", "outcomes"}.intersection(signals):
-            return "Thinking influences life outcomes."
-        if {"thinking", "thoughts", "mind"}.intersection(signals) and {"clear", "straight", "clarity"}.intersection(signals):
-            return "Clear thinking improves decision quality."
-        if {"decision", "decisions", "logic", "emotions", "emotion"}.intersection(signals) and {"emotion", "emotions"}.intersection(signals):
-            return "Emotions influence decisions."
-        if "william" in signals and "james" in signals and {"mind", "change", "life"}.intersection(signals):
-            return "William James linked mental change to life change."
-        if "book" in signals and {"thinking", "thoughts", "control"}.intersection(signals):
-            return "Controlled thinking improves judgment."
-        if "practical" in signals and {"decisions", "thinking"}.intersection(signals):
-            return "Practical thinking improves decisions."
-        if "business" in signals and {"personal", "experiences", "share"}.intersection(signals):
-            return "Personal experience can inform business judgment."
-        if "wisdom" in signals and {"reason", "life", "thinking"}.intersection(signals):
-            return "Reasoned thinking supports practical wisdom."
-        if "biases" in lower and {"decisions", "thinking", "cognitive"}.intersection(signals):
-            return "Cognitive biases distort practical decisions."
-        return ""
+        return None
 
     def _best_clean_original_sentence(self, text: str) -> str:
         sentences = [
@@ -346,13 +318,7 @@ class DistillationEngine:
         return cleaned if self._summary_has_meaning(cleaned, allow_original=True) else ""
 
     def _minimal_meaning_sentence(self, text: str) -> str:
-        compact = self._normalize_text(text)
-        if not compact:
-            return "Meaning cannot be extracted from empty content."
-        words = compact.strip(".").split()[:12]
-        if not words:
-            return "Meaning cannot be extracted from empty content."
-        return self._ensure_sentence_boundary(" ".join(words))
+        return None
 
     def _select_best_summary_sentence(self, sentences: List[str], keywords: List[str]) -> str:
         candidates = []
@@ -407,7 +373,7 @@ class DistillationEngine:
             return False
         return bool(
             self._contains_relation_cue(sentence)
-            or re.search(r"\b(influence|influences|shape|shapes|affect|affects|support|supports|preserve|preserves)\b", sentence, re.IGNORECASE)
+            or re.search(r"\b(enable|enables|improve|improves|drive|drives|lead|leads|dominate|dominates)\b", sentence, re.IGNORECASE)
         )
 
     def _looks_general_statement(self, sentence: str) -> bool:
@@ -416,7 +382,7 @@ class DistillationEngine:
             return False
         return bool(
             self._contains_relation_cue(sentence)
-            or re.search(r"\b(often|generally|usually|tends to|can|should|must)\b", lower)
+            or re.search(r"\b(often|generally|usually|tends to|can|should|must|widely|commonly)\b", lower)
         )
 
     def _title_to_claim(self, text: str) -> str:
@@ -436,23 +402,28 @@ class DistillationEngine:
             return ""
 
         subject, relation, obj = concept
-        relation_text = {
-            "is": "is",
-            "causes": "causes",
-            "improves": "improves",
-            "requires": "requires",
-            "leads_to": "leads to",
-            "depends_on": "depends on",
-        }.get(relation)
+        relation_text = self._relation_text_for_subject(subject, relation)
         if not relation_text:
             return ""
         return self._cap_summary_words(f"{subject} {relation_text} {obj}.")
 
-    def _semantic_rewrite_sentence(self, sentence: str, keywords: List[str]) -> str:
-        known_meaning = self._rewrite_known_meaning(sentence)
-        if known_meaning:
-            return known_meaning
+    def _relation_text_for_subject(self, subject: str, relation: str | None) -> str:
+        subject_lower = subject.lower()
+        plural_subject = (
+            (" and " in subject_lower)
+            or (subject_lower.endswith("s") and not subject_lower.endswith("'s"))
+        )
+        relation_map = {
+            "is": "are" if plural_subject else "is",
+            "enables": "enable" if plural_subject else "enables",
+            "improves": "improve" if plural_subject else "improves",
+            "drives": "drive" if plural_subject else "drives",
+            "leads_to": "lead to" if plural_subject else "leads to",
+            "dominates": "dominate" if plural_subject else "dominates",
+        }
+        return relation_map.get(relation, "")
 
+    def _semantic_rewrite_sentence(self, sentence: str, keywords: List[str]) -> str:
         cleaned = self._clean_sentence_for_summary(sentence)
         simplified = self._simplify_to_svo(cleaned)
         compressed = self._compress_summary_sentence(simplified)
@@ -462,14 +433,6 @@ class DistillationEngine:
         fallback = self._compress_summary_sentence(cleaned)
         if self._sentence_is_readable_summary(fallback):
             return fallback
-        return ""
-
-    def _rewrite_known_meaning(self, sentence: str) -> str:
-        lower = sentence.lower()
-        if "book" in lower and "thinking" in lower and re.search(r"\b(affects|influences|changes|improves)\b", lower) and "life" in lower:
-            return "Thinking influences life outcomes."
-        if "thinking" in lower and "life" in lower and "equation" in lower:
-            return "Thinking requires more than equations."
         return ""
 
     def _clean_sentence_for_summary(self, sentence: str) -> str:
@@ -519,20 +482,10 @@ class DistillationEngine:
             if not subject or not obj:
                 continue
 
-            relation_text = {
-                "is": "is",
-                "causes": "causes",
-                "improves": "improves",
-                "requires": "requires",
-                "leads_to": "leads to",
-                "depends_on": "depends on",
-            }.get(relation)
+            relation_text = self._relation_text_for_subject(subject, relation)
             if relation_text:
                 return self._ensure_sentence_boundary(f"{subject} {relation_text} {obj}")
 
-        passive_influence = self._rewrite_influence(sentence)
-        if passive_influence:
-            return passive_influence
         return self._ensure_sentence_boundary(normalized)
 
     def _rewrite_passive_shape(self, sentence: str) -> str:
@@ -549,19 +502,6 @@ class DistillationEngine:
         if not subject or not obj:
             return ""
         return self._ensure_sentence_boundary(f"{subject} is shaped by {obj}")
-
-    def _rewrite_influence(self, sentence: str) -> str:
-        lower = sentence.lower()
-        if "decision" in lower and re.search(r"\b(emotion|emotions|feeling|feelings)\b", lower):
-            return "Decisions are influenced by emotions."
-        match = re.search(r"\b(?P<actor>[A-Za-z][A-Za-z\s-]{2,40}?)\s+(?:influences|influence|affects|affect|shapes|shape)\s+(?P<object>[A-Za-z][A-Za-z\s-]{2,50})", sentence, re.IGNORECASE)
-        if not match:
-            return ""
-        actor = self._extract_entity(match.group("actor"), side="subject")
-        obj = self._extract_entity(match.group("object"), side="object")
-        if not actor or not obj:
-            return ""
-        return self._ensure_sentence_boundary(f"{obj} is influenced by {actor}")
 
     def _compress_summary_sentence(self, sentence: str) -> str:
         words = sentence.strip().strip(".").split()
@@ -594,6 +534,18 @@ class DistillationEngine:
             return False
         if not self._has_subject_action(sentence):
             return False
+        simplified = self._simplify_sentence(sentence)
+        for pattern in self.RELATION_PATTERNS:
+            match = pattern.search(simplified)
+            if not match:
+                continue
+
+            relation = self.CONTENT_RELATIONS.get(match.group("relation").lower())
+            subject = self._extract_entity(match.group("subject"), side="subject")
+            obj = self._extract_entity(match.group("object"), side="object")
+            if not self._valid_triple(subject, relation, obj):
+                return False
+            break
         return True
 
     def _summary_has_meaning(self, summary: str | None, allow_original: bool = False) -> bool:
@@ -608,6 +560,12 @@ class DistillationEngine:
             "content contains",
         )
         if lower.startswith(forbidden_prefixes):
+            return False
+        if re.search(r"\b(this book|this text|this paper|content)\b", lower):
+            return False
+        if re.search(r"\b(this|that|these|those)\b", lower):
+            return False
+        if any(fragment in lower for fragment in ("like this", "some ways", "looked upon")):
             return False
 
         words = self._word_tokens(summary)
@@ -625,19 +583,13 @@ class DistillationEngine:
 
         if not allow_original and not (
             self._has_subject_action(summary)
-            or re.search(r"\b(influences|improves|requires|distorts|supports|linked|shapes|affects)\b", lower)
+            or re.search(r"\b(is|enables|improves|drives|dominates)\b", lower)
         ):
             return False
         return True
 
     def _rewrite_contrast(self, sentence: str) -> str:
         lower = sentence.lower()
-        if "decision" in lower and "logic" in lower and re.search(r"\b(emotion|emotions|feeling|feelings)\b", lower):
-            return "Decisions are influenced by emotions."
-        if "semantic chunking" in lower and "preserves context" in lower and "formatting" in lower:
-            return "Semantic chunking preserves context despite irregular formatting."
-        if "neural retrieval" in lower and "improves" in lower and "search quality" in lower:
-            return "Neural retrieval improves search quality."
         if "but" not in lower:
             return ""
 
@@ -646,9 +598,6 @@ class DistillationEngine:
             return ""
 
         right = self._ensure_sentence_boundary(clauses[1].strip())
-        influence_summary = self._rewrite_influence(right)
-        if influence_summary:
-            return influence_summary
         if not self._has_subject_action(right):
             return ""
         return self._compress_summary_sentence(right)
@@ -845,15 +794,19 @@ class DistillationEngine:
         return any(marker in lower for marker in (" i ", " we ", " my ", " our ", " story ", " remembers ", " said ", " when "))
 
     def _valid_triple(self, subject: str, relation: str | None, obj: str) -> bool:
-        if relation not in {"is", "causes", "improves", "depends_on", "leads_to", "requires"}:
+        if relation not in {"is", "enables", "improves", "drives", "leads_to", "dominates"}:
             return False
         if not self._phrase_is_meaningful(subject, max_words=5):
             return False
-        if not self._phrase_is_meaningful(obj, max_words=5):
+        if not self._phrase_is_meaningful(obj, max_words=6):
             return False
         if subject.lower() in self.PRONOUN_SUBJECTS:
             return False
         if obj.lower() in self.PRONOUN_SUBJECTS:
+            return False
+        if any(word in self.PRONOUN_SUBJECTS for word in self._word_tokens(subject)):
+            return False
+        if any(word in self.PRONOUN_SUBJECTS for word in self._word_tokens(obj)):
             return False
         if subject.lower() == obj.lower():
             return False
@@ -861,7 +814,11 @@ class DistillationEngine:
             return False
         if re.search(r"\b(and|or|but)\b", subject.lower()) and len(self._word_tokens(subject)) > 4:
             return False
+        if re.search(r"\b(and|or|but)\b", obj.lower()) and len(self._word_tokens(obj)) > 4:
+            return False
         if not self._looks_like_noun_phrase(subject):
+            return False
+        if not self._looks_like_noun_phrase(obj):
             return False
         if self._is_vague_phrase(obj):
             return False
@@ -914,6 +871,12 @@ class DistillationEngine:
         sentence = re.sub(r"\s+", " ", sentence)
         sentence = re.sub(r"^(in general|generally|overall|therefore|however|because|for this reason),?\s+", "", sentence, flags=re.IGNORECASE)
         sentence = re.split(r"\s+(?:because|although|whereas|while|but|and therefore)\s+", sentence, maxsplit=1, flags=re.IGNORECASE)[0]
+        sentence = re.split(
+            r"\s+(?:and|or)\s+(?:supports?|enables?|improves?|drives?|dominates?|extends?|scales?)\b",
+            sentence,
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0]
         sentence = re.split(r"\s*[,;:]\s*", sentence, maxsplit=1)[0] if self._has_relation_before_delimiter(sentence) else sentence
         return sentence.strip(" .;!?")
 

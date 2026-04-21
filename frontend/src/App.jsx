@@ -1,15 +1,16 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Upload, FileText, Loader2, Send, ChevronRight, ChevronDown, CheckCircle2, AlertCircle, BookOpen, Clock, Zap, FileSearch } from 'lucide-react';
+import { Upload, FileText, Loader2, Send, ChevronRight, ChevronDown, CheckCircle2, AlertCircle, BookOpen, Clock, Zap, FileSearch, Download, Archive } from 'lucide-react';
 
 const API_BASE = "http://localhost:8000";
 const SESSION_STORAGE_KEY = "liteRAG-session";
+const EMPTY_SESSION = { id: null, documentName: null, originalSize: null, artifactSize: null };
 
 const loadStoredSession = () => {
   try {
     const raw = window.localStorage.getItem(SESSION_STORAGE_KEY);
-    return raw ? JSON.parse(raw) : { id: null, documentName: null };
+    return raw ? { ...EMPTY_SESSION, ...JSON.parse(raw) } : EMPTY_SESSION;
   } catch {
-    return { id: null, documentName: null };
+    return EMPTY_SESSION;
   }
 };
 
@@ -28,6 +29,17 @@ const clearStoredSession = () => {
     // Ignore storage failures and continue with in-memory state.
   }
 };
+
+const formatBytes = (bytes) => {
+  if (!bytes || bytes <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const order = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / 1024 ** order;
+  const precision = order === 0 ? 0 : order === 1 ? 1 : 2;
+  return `${value.toFixed(precision)} ${units[order]}`;
+};
+
+const buildArtifactFilename = (fileId) => `artifact_${fileId || 'document'}.json`;
 
 // --- Helpers ---
 const getConfidenceColor = (score) => {
@@ -306,10 +318,102 @@ const QueryStatusText = React.memo(() => {
   return <span className="mono-text" style={{ fontSize: '0.8rem', letterSpacing: '0.05em' }}>{loadingTexts[textIndex]}</span>;
 });
 
+const ArtifactPanel = ({ session, artifactState, onDownload }) => {
+  const originalSize = artifactState.originalSize ?? session.originalSize ?? 0;
+  const compressedSize = artifactState.size ?? session.artifactSize ?? 0;
+  const ratio = originalSize > 0 && compressedSize > 0 ? originalSize / compressedSize : null;
+  const compressedPercent = originalSize > 0 && compressedSize > 0
+    ? Math.max(10, Math.min(100, (compressedSize / originalSize) * 100))
+    : 18;
+
+  return (
+    <section className="artifact-panel animate-slide-up">
+      <div className="artifact-panel__header">
+        <div>
+          <p className="mono-text artifact-panel__eyebrow">Compression Result</p>
+          <h2 className="artifact-panel__title">Knowledge artifact ready for export.</h2>
+          <p className="artifact-panel__subtitle">
+            The distilled JSON is prepared for reuse, inspection, and downstream retrieval workflows.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          className="artifact-download-btn"
+          onClick={onDownload}
+          disabled={artifactState.status !== 'ready'}
+        >
+          {artifactState.status === 'loading' ? (
+            <>
+              <Loader2 size={16} className="animate-spin" />
+              Preparing Artifact...
+            </>
+          ) : (
+            <>
+              <Download size={16} />
+              Download Artifact
+            </>
+          )}
+        </button>
+      </div>
+
+      <div className="compression-card">
+        <div className="compression-card__meta">
+          <div className="compression-stat">
+            <span className="compression-stat__label">Original Size</span>
+            <strong className="compression-stat__value">{originalSize ? formatBytes(originalSize) : 'Waiting...'}</strong>
+          </div>
+          <div className="compression-stat">
+            <span className="compression-stat__label">Compressed Size</span>
+            <strong className="compression-stat__value">{compressedSize ? formatBytes(compressedSize) : 'Preparing...'}</strong>
+          </div>
+          <div className="compression-stat">
+            <span className="compression-stat__label">Reduction</span>
+            <strong className="compression-stat__value compression-stat__value--accent">
+              {ratio ? `${ratio.toFixed(1)}x smaller` : 'Calculating...'}
+            </strong>
+          </div>
+        </div>
+
+        <div className="compression-bars">
+          <div className="compression-bar-row">
+            <div className="compression-bar-row__header">
+              <span className="compression-bar-row__label">Original</span>
+              <span className="compression-bar-row__size">{originalSize ? formatBytes(originalSize) : '--'}</span>
+            </div>
+            <div className="compression-bar-track">
+              <div className="compression-bar compression-bar--original" style={{ width: '100%' }} />
+            </div>
+          </div>
+
+          <div className="compression-bar-row">
+            <div className="compression-bar-row__header">
+              <span className="compression-bar-row__label">Compressed</span>
+              <span className="compression-bar-row__size">{compressedSize ? formatBytes(compressedSize) : '--'}</span>
+            </div>
+            <div className="compression-bar-track">
+              <div className="compression-bar compression-bar--compressed" style={{ width: `${compressedPercent}%` }} />
+            </div>
+          </div>
+        </div>
+
+        <div className="compression-card__footer">
+          <span className="compression-card__note">
+            <Archive size={14} />
+            JSON artifact keeps distilled structure while trimming bulk from the source document.
+          </span>
+          <span className="compression-card__filename">{buildArtifactFilename(session.id)}</span>
+        </div>
+      </div>
+    </section>
+  );
+};
+
 // --- Main App ---
 
 function App() {
   const [session, setSession] = useState(() => loadStoredSession());
+  const [artifactState, setArtifactState] = useState({ status: 'idle', size: null, originalSize: null, fetchedFor: null });
   const [status, setStatus] = useState('checking'); // checking, idle, uploading, ready
   const [uploadStages, setUploadStages] = useState([]);
   const [messages, setMessages] = useState([]);
@@ -336,6 +440,76 @@ function App() {
   
   const bottomRef = useRef(null);
 
+  const syncSession = (nextSession) => {
+    setSession(nextSession);
+    saveStoredSession(nextSession);
+  };
+
+  useEffect(() => {
+    if (status !== 'ready' || !session.id) return;
+
+    let cancelled = false;
+    let intervalId;
+
+    const pollArtifactStatus = async () => {
+      if (!cancelled) {
+        setArtifactState((prev) => ({
+          status: prev.status === 'ready' && prev.fetchedFor === session.id ? 'ready' : 'loading',
+          size: prev.size,
+          originalSize: prev.originalSize,
+          fetchedFor: session.id,
+        }));
+      }
+
+      try {
+        const response = await fetch(`${API_BASE}/artifact/status`);
+        if (!response.ok) throw new Error('Artifact status unavailable');
+
+        const data = await response.json();
+        console.log('/artifact/status', data);
+        if (cancelled) return;
+
+        if (data.ready) {
+          const resolvedSession = {
+            ...session,
+            id: data.file_id || session.id,
+            originalSize: data.original_size || session.originalSize || null,
+            artifactSize: data.artifact_size || null,
+          };
+
+          setArtifactState({
+            status: 'ready',
+            size: data.artifact_size || null,
+            originalSize: data.original_size || null,
+            fetchedFor: resolvedSession.id,
+          });
+          setSession(resolvedSession);
+          saveStoredSession(resolvedSession);
+          return;
+        }
+
+        setArtifactState({
+          status: 'loading',
+          size: null,
+          originalSize: data.original_size || session.originalSize || null,
+          fetchedFor: session.id,
+        });
+      } catch (err) {
+        if (cancelled) return;
+        console.error(err);
+        setArtifactState({ status: 'error', size: null, originalSize: session.originalSize || null, fetchedFor: session.id });
+      }
+    };
+
+    pollArtifactStatus();
+    intervalId = window.setInterval(pollArtifactStatus, 1500);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [status, session.id]);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -351,7 +525,7 @@ function App() {
           const storedSession = loadStoredSession();
           const nextSession = storedSession?.documentName
             ? storedSession
-            : { id: 'persisted-index', documentName: data.source || 'Indexed document' };
+            : { ...EMPTY_SESSION, id: 'persisted-index', documentName: data.source || 'Indexed document' };
 
           setSession(nextSession);
           saveStoredSession(nextSession);
@@ -360,7 +534,8 @@ function App() {
         }
 
         clearStoredSession();
-        setSession({ id: null, documentName: null });
+        setSession(EMPTY_SESSION);
+        setArtifactState({ status: 'idle', size: null, originalSize: null, fetchedFor: null });
         setMessages([]);
         setStatus('idle');
       } catch (err) {
@@ -393,6 +568,7 @@ function App() {
 
     setStatus('uploading');
     setUploadStages([]);
+    setArtifactState({ status: 'loading', size: null, originalSize: uploadedFile.size, fetchedFor: null });
     
     // UI Simulation for UX Feedback
     addUploadStage('Extracting...', true, false);
@@ -418,9 +594,14 @@ function App() {
       
       setTimeout(() => {
         addUploadStage('Indexing...', false, true);
-        const nextSession = { id: data.file_id || Date.now(), documentName: uploadedFile.name };
-        setSession(nextSession);
-        saveStoredSession(nextSession);
+        const nextSession = {
+          ...EMPTY_SESSION,
+          id: data.file_id || Date.now(),
+          documentName: uploadedFile.name,
+          originalSize: uploadedFile.size,
+          artifactSize: null,
+        };
+        syncSession(nextSession);
         setStatus('ready');
       }, 500);
       
@@ -499,7 +680,8 @@ function App() {
       if (!response.ok) throw new Error('Reset failed');
 
       clearStoredSession();
-      setSession({ id: null, documentName: null });
+      setSession(EMPTY_SESSION);
+      setArtifactState({ status: 'idle', size: null, originalSize: null, fetchedFor: null });
       setMessages([]);
       setUploadStages([]);
       setQuery('');
@@ -509,6 +691,28 @@ function App() {
       alert('Failed to reset the current session. Please try again.');
     } finally {
       setIsResetting(false);
+    }
+  };
+
+  const handleDownloadArtifact = async () => {
+    if (artifactState.status !== 'ready') return;
+
+    try {
+      const response = await fetch(`${API_BASE}/export`);
+      if (!response.ok) throw new Error('Artifact download unavailable');
+
+      const blob = await response.blob();
+      const objectUrl = window.URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = objectUrl;
+      anchor.download = buildArtifactFilename(session.id);
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.URL.revokeObjectURL(objectUrl);
+    } catch (err) {
+      console.error(err);
+      alert('Failed to download the knowledge artifact. Please try again.');
     }
   };
 
@@ -664,6 +868,14 @@ function App() {
       {/* Research Transcript State */}
       {status === 'ready' && (
         <div className="transcript-container animate-fade-in">
+          {session.documentName && (
+            <ArtifactPanel
+              session={session}
+              artifactState={artifactState}
+              onDownload={handleDownloadArtifact}
+            />
+          )}
+
           {messages.length === 0 ? (
             <div style={{ padding: '4rem 0', opacity: 0.5, maxWidth: '600px' }}>
               <h2 style={{ marginBottom: '1rem' }}>Document Indexed.</h2>
