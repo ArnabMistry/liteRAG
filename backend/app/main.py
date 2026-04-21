@@ -1,5 +1,5 @@
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import json
@@ -35,6 +35,7 @@ app.add_middleware(
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
 )
 
 # Initialize components
@@ -343,13 +344,29 @@ async def artifact_status():
 
 @app.get("/export")
 def export_knowledge():
-    if not KNOWLEDGE_ARTIFACT_PATH.exists():
-        raise HTTPException(status_code=404, detail="No artifact found")
+    metadata_path = os.path.join(BASE_DIR, "data", "metadata.json")
+    if not os.path.exists(metadata_path):
+        raise HTTPException(status_code=404, detail="Metadata file not found")
 
-    return FileResponse(
-        KNOWLEDGE_ARTIFACT_PATH,
+    with open(metadata_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    pretty_json = json.dumps(data, indent=2)
+
+    file_id = data.get("file_id") if isinstance(data, dict) else None
+
+    if file_id:
+        filename = f"{file_id}.json"
+    else:
+        from datetime import datetime
+        filename = f"metadata_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+
+    return Response(
+        content=pretty_json,
         media_type="application/json",
-        filename="knowledge_artifact.json",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        }
     )
 
 @app.post("/upload")

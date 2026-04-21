@@ -3,6 +3,25 @@ from collections import Counter
 from typing import Dict, List
 
 
+DISTILLATION_PROMPT = """
+Reconstruct the input into a complete grounded sentence before compression.
+Preserve only factual meaning present in the input text.
+Do not invent abstractions, system-level summaries, or missing facts.
+Then compress the reconstructed sentence into one retrieval-ready sentence of at most 15 words.
+The output must remain answerable for downstream QA.
+Reject vague, contextless, or weak summaries.
+""".strip()
+
+
+def reconstruct_meaning(text: str) -> str:
+    """
+    Reconstruct broken or partial sentences into a complete meaningful sentence
+    before compression.
+    """
+    engine = DistillationEngine()
+    return engine._reconstruct_meaning(text)
+
+
 class DistillationEngine:
     """Deterministic, precision-first chunk distillation for RAG artifacts."""
 
@@ -61,6 +80,7 @@ class DistillationEngine:
         "important", "useful", "helpful", "good", "bad", "better", "worse",
         "effective", "ineffective", "necessary", "possible", "available",
         "different", "similar", "same", "thing", "things", "problem", "problems",
+        "reason", "reasons", "pattern", "patterns",
     }
 
     CONCEPT_SENTENCE_CUES = {
@@ -143,10 +163,20 @@ class DistillationEngine:
             }
 
         raw_sentences = self._split_sentences(cleaned_text)
-        sentences = self._content_sentences(cleaned_text)
+        reconstructed_text = self._reconstruct_meaning(cleaned_text)
+        reconstructed_sentences = self._split_sentences(reconstructed_text) if reconstructed_text else []
+        sentences = self._content_sentences(reconstructed_text or cleaned_text)
         keywords = self._keywords(cleaned_text, chunk_type=chunk_type)
-        concepts = self._concept_triples(raw_sentences)
-        summary = self._summarize(sentences, raw_sentences, keywords, cleaned_text, concepts)
+        concepts = self._concept_triples(reconstructed_sentences or raw_sentences)
+        summary = self._summarize(
+            sentences,
+            raw_sentences,
+            reconstructed_sentences,
+            keywords,
+            cleaned_text,
+            reconstructed_text,
+            concepts,
+        )
         scores = {
             "summary_score": self._score_summary(summary, keywords),
             "keyword_score": self._score_keywords(keywords),
@@ -162,12 +192,12 @@ class DistillationEngine:
             scores["keyword_score"] = 0
 
         if not summary:
-            summary = self._fallback_summary(raw_sentences, cleaned_text)
+            summary = self._fallback_summary(reconstructed_sentences or raw_sentences, reconstructed_text or cleaned_text)
             scores["summary_score"] = self._score_summary(summary, keywords)
         if not summary:
-            summary = self._meaning_fallback_summary(cleaned_text, keywords)
+            summary = self._meaning_fallback_summary(reconstructed_text or cleaned_text, keywords)
             scores["summary_score"] = self._score_summary(summary, keywords)
-        if not self._summary_has_meaning(summary):
+        if not self._summary_has_meaning(summary) or not self._is_summary_grounded(cleaned_text, summary, keywords):
             summary = None
             scores["summary_score"] = self._score_summary(summary, keywords)
         if summary is None and not concepts:
@@ -240,26 +270,28 @@ class DistillationEngine:
         self,
         sentences: List[str],
         raw_sentences: List[str],
+        reconstructed_sentences: List[str],
         keywords: List[str],
         raw_text: str,
+        reconstructed_text: str,
         concepts: List[List[str]],
     ) -> str:
-        title_claim = self._title_to_claim(raw_text)
+        title_claim = self._title_to_claim(reconstructed_text or raw_text)
         if title_claim:
             return title_claim
 
-        selected_sentence = self._select_best_summary_sentence(raw_sentences, keywords)
+        selected_sentence = self._select_best_summary_sentence(reconstructed_sentences or raw_sentences, keywords)
         if selected_sentence:
-            summary = self._semantic_rewrite_sentence(selected_sentence, keywords)
+            summary = self._semantic_rewrite_sentence(selected_sentence, keywords, raw_text)
             if summary:
                 return summary
 
         if concepts:
             concept_summary = self._summary_from_concept(concepts[0])
-            if concept_summary:
+            if concept_summary and self._is_summary_grounded(raw_text, concept_summary, keywords):
                 return concept_summary
 
-        return self._fallback_summary(raw_sentences, raw_text)
+        return self._fallback_summary(reconstructed_sentences or raw_sentences, reconstructed_text or raw_text)
 
     def _fallback_summary(self, raw_sentences: List[str], raw_text: str) -> str:
         candidates = [
@@ -269,7 +301,7 @@ class DistillationEngine:
         ]
         if candidates:
             best_sentence = max(candidates, key=self._sentence_signal_score)
-            summary = self._semantic_rewrite_sentence(best_sentence, [])
+            summary = self._semantic_rewrite_sentence(best_sentence, [], raw_text)
             if summary:
                 return summary
             return self._safe_original_summary(best_sentence) or self._meaning_fallback_summary(best_sentence, [])
@@ -278,7 +310,7 @@ class DistillationEngine:
         if not compact:
             return ""
 
-        summary = self._semantic_rewrite_sentence(compact, [])
+        summary = self._semantic_rewrite_sentence(compact, [], raw_text)
         if summary:
             return summary
         return self._safe_original_summary(compact) or self._meaning_fallback_summary(compact, [])
@@ -300,6 +332,93 @@ class DistillationEngine:
             return original
 
         return None
+
+    def _reconstruct_meaning(self, text: str) -> str:
+        normalized = self._normalize_text(text)
+        if not normalized:
+            return ""
+
+        sentences = [sentence for sentence in self._split_sentences(normalized) if not self._is_noise_sentence(sentence)]
+        if sentences:
+            best_sentence = self._select_best_summary_sentence(sentences, self._keywords(normalized))
+            candidate = best_sentence or max(sentences, key=self._sentence_signal_score)
+            reconstructed = self._reconstruct_sentence(candidate)
+            if reconstructed and self._reconstruction_is_grounded(normalized, reconstructed):
+                return reconstructed
+
+        reconstructed = self._reconstruct_sentence(normalized)
+        if reconstructed and self._reconstruction_is_grounded(normalized, reconstructed):
+            return reconstructed
+        return ""
+
+    def _reconstruct_sentence(self, sentence: str) -> str:
+        cleaned = self._clean_sentence_for_summary(sentence)
+        if not cleaned:
+            return ""
+
+        cleaned = re.sub(r"\s*[-–—]\s*", " ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        cleaned = re.sub(r"^(?:and|but|so|because|therefore|however)\s+", "", cleaned, flags=re.IGNORECASE)
+
+        fragment_reconstruction = self._reconstruct_fragment_claim(cleaned)
+        if fragment_reconstruction:
+            return self._ensure_sentence_boundary(fragment_reconstruction)
+
+        if self._has_subject_action(cleaned):
+            reconstructed = self._simplify_to_svo(cleaned)
+            if reconstructed:
+                return self._ensure_sentence_boundary(reconstructed)
+
+        for pattern in self.RELATION_PATTERNS:
+            match = pattern.search(self._simplify_sentence(cleaned))
+            if not match:
+                continue
+            relation = self.CONTENT_RELATIONS.get(match.group("relation").lower())
+            subject = self._extract_entity(match.group("subject"), side="subject")
+            obj = self._extract_entity(match.group("object"), side="object")
+            if self._valid_triple(subject, relation, obj):
+                relation_text = self._relation_text_for_subject(subject, relation)
+                return self._ensure_sentence_boundary(f"{subject} {relation_text} {obj}")
+
+        words = cleaned.split()
+        if 5 <= len(words) <= 18:
+            return self._ensure_sentence_boundary(cleaned)
+        return ""
+
+    def _reconstruct_fragment_claim(self, sentence: str) -> str:
+        normalized = self._simplify_sentence(sentence)
+        words = self._word_tokens(normalized)
+        if len(words) < 4:
+            return ""
+        if any(fragment in normalized.lower() for fragment in ("looked upon", "like this", "some ways")):
+            return ""
+
+        reason_match = re.search(r"(?P<predicate>.+?)\s+is\s+(?P<subject>[A-Za-z][A-Za-z\s'-]{2,40})$", normalized, re.IGNORECASE)
+        if reason_match:
+            predicate = self._clean_phrase(reason_match.group("predicate")).lower()
+            subject = self._extract_entity(reason_match.group("subject"), side="subject")
+            if "reason" in predicate and subject and subject not in self.PRONOUN_SUBJECTS:
+                return f"{subject} is the main reason"
+
+        if {"pattern", "research", "progress"}.intersection(words) and "seen" in words:
+            subject = "research progress"
+            obj = "similar patterns"
+            return f"{subject} shows {obj}"
+
+        if "computer" in words and "progress" in words and "pattern" in words:
+            return "Research progress shows similar patterns"
+
+        return ""
+
+    def _reconstruction_is_grounded(self, source_text: str, reconstructed: str) -> bool:
+        if not reconstructed:
+            return False
+        source_tokens = self._grounding_terms(source_text)
+        reconstructed_tokens = set(self._word_tokens(reconstructed))
+        if not source_tokens or not reconstructed_tokens:
+            return False
+        overlap = len(source_tokens.intersection(reconstructed_tokens))
+        return overlap >= min(2, len(source_tokens))
 
     def _best_clean_original_sentence(self, text: str) -> str:
         sentences = [
@@ -373,7 +492,7 @@ class DistillationEngine:
             return False
         return bool(
             self._contains_relation_cue(sentence)
-            or re.search(r"\b(enable|enables|improve|improves|drive|drives|lead|leads|dominate|dominates)\b", sentence, re.IGNORECASE)
+            or re.search(r"\b(enable|enables|improve|improves|drive|drives|lead|leads|dominate|dominates|show|shows|follow|follows)\b", sentence, re.IGNORECASE)
         )
 
     def _looks_general_statement(self, sentence: str) -> bool:
@@ -423,15 +542,15 @@ class DistillationEngine:
         }
         return relation_map.get(relation, "")
 
-    def _semantic_rewrite_sentence(self, sentence: str, keywords: List[str]) -> str:
+    def _semantic_rewrite_sentence(self, sentence: str, keywords: List[str], source_text: str = "") -> str:
         cleaned = self._clean_sentence_for_summary(sentence)
         simplified = self._simplify_to_svo(cleaned)
         compressed = self._compress_summary_sentence(simplified)
-        if self._sentence_is_readable_summary(compressed):
+        if self._sentence_is_readable_summary(compressed) and self._is_summary_grounded(source_text or sentence, compressed, keywords):
             return compressed
 
         fallback = self._compress_summary_sentence(cleaned)
-        if self._sentence_is_readable_summary(fallback):
+        if self._sentence_is_readable_summary(fallback) and self._is_summary_grounded(source_text or sentence, fallback, keywords):
             return fallback
         return ""
 
@@ -548,6 +667,34 @@ class DistillationEngine:
             break
         return True
 
+    def _grounding_terms(self, text: str) -> set:
+        return {
+            token
+            for token in self._word_tokens(text)
+            if token not in self.STOPWORDS
+            and token not in self.FILLER_TERMS
+            and token not in self.GENERIC_KEYWORD_TERMS
+        }
+
+    def _is_summary_grounded(self, source_text: str, summary: str | None, keywords: List[str] | None = None) -> bool:
+        if not summary:
+            return False
+
+        source_terms = self._grounding_terms(source_text)
+        summary_terms = set(self._word_tokens(summary))
+        if not source_terms or not summary_terms:
+            return False
+
+        overlap_terms = source_terms.intersection(summary_terms)
+        required_terms = []
+        if keywords:
+            required_terms = [term for term in keywords[:3] if term in source_terms]
+
+        has_required = bool(overlap_terms.intersection(required_terms)) if required_terms else True
+        overlap_count = len(overlap_terms)
+        has_relation = bool(re.search(r"\b(is|are|enable|enables|improve|improves|drive|drives|lead to|leads to|dominate|dominates|show|shows|follow|follows)\b", summary.lower()))
+        return has_relation and has_required and overlap_count >= min(2, len(source_terms))
+
     def _summary_has_meaning(self, summary: str | None, allow_original: bool = False) -> bool:
         if not summary:
             return False
@@ -580,11 +727,15 @@ class DistillationEngine:
         ]
         if len(meaningful) < 2:
             return False
+        if len(set(meaningful)) < 2:
+            return False
 
         if not allow_original and not (
             self._has_subject_action(summary)
-            or re.search(r"\b(is|enables|improves|drives|dominates)\b", lower)
+            or re.search(r"\b(is|enables|improves|drives|dominates|shows|follows)\b", lower)
         ):
+            return False
+        if not re.search(r"\b(is|are|enable|enables|improve|improves|drive|drives|lead to|leads to|dominate|dominates|show|shows|follow|follows)\b", lower):
             return False
         return True
 

@@ -56,17 +56,17 @@ const getConfidenceText = (score) => {
 
 const highlightRelevantSentences = (text, query) => {
   if (!text || !query) return text;
-  
+
   const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length > 3);
   if (queryWords.length === 0) return text;
 
   // Simple contextual highlighter: highlight sentences containing strong query matches
   const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
-  
+
   return sentences.map((sentence, idx) => {
     const sLower = sentence.toLowerCase();
     const hasMatch = queryWords.some(w => sLower.includes(w));
-    
+
     if (hasMatch) {
       // Bold the specific matching words within the sentence
       let highlightedSentence = sentence;
@@ -84,13 +84,13 @@ const highlightRelevantSentences = (text, query) => {
 
 const processAnswer = (text) => {
   const lines = text.split("\n").map(l => l.trim()).filter(l => l);
-  
+
   const parsed = {
     blocks: []
   };
-  
+
   let currentList = [];
-  
+
   let highlightCount = 0;
   const formatContent = (content) => {
     if (!content) return "";
@@ -122,7 +122,7 @@ const processAnswer = (text) => {
       flushList();
       const title = titleMatch[1];
       const content = titleMatch[2];
-      
+
       parsed.blocks.push({ type: 'h3', content: title });
       if (content) {
         parsed.blocks.push({ type: 'p', content: formatContent(content) });
@@ -149,7 +149,7 @@ const SourceHighlight = ({ sources, cached, query }) => {
 
   return (
     <div className="source-highlight animate-fade-in" style={{ marginTop: '2rem', borderTop: '1px solid var(--border)', paddingTop: '1.5rem' }}>
-      <div 
+      <div
         style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', cursor: 'pointer', userSelect: 'none' }}
         onClick={() => setExpanded(!expanded)}
       >
@@ -159,7 +159,7 @@ const SourceHighlight = ({ sources, cached, query }) => {
           </h3>
           <span style={{ borderLeft: '1px solid var(--border)', paddingLeft: '1rem', display: 'flex', gap: '1rem' }}>
             <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
-              Synthesized from <strong style={{color: 'var(--text-primary)'}}>{sources.length} chunks</strong> across <strong style={{color: 'var(--text-primary)'}}>{uniquePages.size} pages</strong>
+              Synthesized from <strong style={{ color: 'var(--text-primary)' }}>{sources.length} chunks</strong> across <strong style={{ color: 'var(--text-primary)' }}>{uniquePages.size} pages</strong>
             </span>
           </span>
         </div>
@@ -174,25 +174,25 @@ const SourceHighlight = ({ sources, cached, query }) => {
             const isRank1 = source.rank === 1 || idx === 0;
             const confColor = getConfidenceColor(source.score);
             const confText = getConfidenceText(source.score);
-            
+
             return (
-              <div id={`source-${source.rank || idx + 1}`} key={idx} style={{ 
-                background: isRank1 ? 'var(--bg-tertiary)' : 'var(--bg-secondary)', 
+              <div id={`source-${source.rank || idx + 1}`} key={idx} style={{
+                background: isRank1 ? 'var(--bg-tertiary)' : 'var(--bg-secondary)',
                 borderLeft: `${isRank1 ? '4px' : '2px'} solid ${isRank1 ? 'var(--accent)' : 'var(--border)'}`,
                 padding: '1.25rem',
                 borderRadius: '0 var(--radius-sm) var(--radius-sm) 0',
                 opacity: isRank1 ? 1 : 0.85,
                 transition: 'opacity 0.2s ease',
               }}
-              onMouseEnter={(e) => e.currentTarget.style.opacity = '1'}
-              onMouseLeave={(e) => e.currentTarget.style.opacity = isRank1 ? '1' : '0.85'}
+                onMouseEnter={(e) => e.currentTarget.style.opacity = '1'}
+                onMouseLeave={(e) => e.currentTarget.style.opacity = isRank1 ? '1' : '0.85'}
               >
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '1rem' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                    <span style={{ 
-                      fontFamily: 'var(--font-mono)', 
-                      fontSize: '0.75rem', 
-                      color: isRank1 ? 'var(--accent)' : 'var(--text-secondary)', 
+                    <span style={{
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: '0.75rem',
+                      color: isRank1 ? 'var(--accent)' : 'var(--text-secondary)',
                       fontWeight: isRank1 ? 700 : 500,
                       background: isRank1 ? 'var(--accent-soft)' : 'transparent',
                       padding: isRank1 ? '0.1rem 0.5rem' : '0',
@@ -204,9 +204,9 @@ const SourceHighlight = ({ sources, cached, query }) => {
                       PAGE {source.page}
                     </span>
                     {source.score !== undefined && (
-                      <span style={{ 
-                        fontFamily: 'var(--font-mono)', 
-                        fontSize: '0.7rem', 
+                      <span style={{
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: '0.7rem',
                         color: confColor,
                         display: 'flex',
                         alignItems: 'center',
@@ -217,12 +217,12 @@ const SourceHighlight = ({ sources, cached, query }) => {
                     )}
                   </div>
                 </div>
-                
+
                 <details open={isRank1} style={{ fontFamily: 'var(--font-body)', fontSize: '0.875rem', color: 'var(--text-primary)', lineHeight: 1.6 }}>
                   <summary style={{ cursor: 'pointer', outline: 'none', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>
                     <span style={{ fontStyle: 'italic' }}>Relevant excerpt</span>
                   </summary>
-                  <div 
+                  <div
                     style={{ padding: '1rem', background: 'var(--bg-secondary)', borderRadius: 'var(--radius-sm)', marginTop: '0.5rem', whiteSpace: 'pre-wrap', border: '1px solid var(--border)' }}
                     dangerouslySetInnerHTML={{ __html: highlightRelevantSentences(source.text, query) || "Backend payload missing text extract." }}
                   />
@@ -260,7 +260,7 @@ const TranscriptItem = ({ message }) => {
 
   return (
     <div className="animate-slide-up" style={{ marginBottom: '4rem', marginLeft: '2rem' }}>
-      
+
       {message.isFailure ? (
         <div style={{ borderLeft: '3px solid var(--error)', padding: '1.5rem', background: 'var(--bg-tertiary)', borderRadius: '0 var(--radius-sm) var(--radius-sm) 0' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: 'var(--error)', marginBottom: '0.5rem', fontFamily: 'var(--font-mono)', fontSize: '0.75rem' }}>
@@ -307,7 +307,7 @@ const QueryStatusText = React.memo(() => {
     "Generating Response...",
     "Finalizing..."
   ], []);
-  
+
   useEffect(() => {
     const interval = setInterval(() => {
       setTextIndex(p => (p + 1) % loadingTexts.length);
@@ -419,7 +419,7 @@ function App() {
   const [messages, setMessages] = useState([]);
   const [isDragging, setIsDragging] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
-  
+
   const handleDragOver = (e) => {
     e.preventDefault();
     setIsDragging(true);
@@ -437,7 +437,7 @@ function App() {
   };
   const [query, setQuery] = useState('');
   const [isQuerying, setIsQuerying] = useState(false);
-  
+
   const bottomRef = useRef(null);
 
   const syncSession = (nextSession) => {
@@ -569,7 +569,7 @@ function App() {
     setStatus('uploading');
     setUploadStages([]);
     setArtifactState({ status: 'loading', size: null, originalSize: uploadedFile.size, fetchedFor: null });
-    
+
     // UI Simulation for UX Feedback
     addUploadStage('Extracting...', true, false);
 
@@ -579,7 +579,7 @@ function App() {
     try {
       setTimeout(() => addUploadStage('Extracting...', false, true), 300);
       setTimeout(() => addUploadStage('Chunking...', true, false), 400);
-      
+
       const response = await fetch(`${API_BASE}/upload`, {
         method: 'POST',
         body: formData,
@@ -587,11 +587,11 @@ function App() {
 
       if (!response.ok) throw new Error('Upload failed');
       const data = await response.json();
-      
+
       addUploadStage('Chunking...', false, true);
       addUploadStage('Embedding...', false, true);
       addUploadStage('Indexing...', true, false);
-      
+
       setTimeout(() => {
         addUploadStage('Indexing...', false, true);
         const nextSession = {
@@ -604,7 +604,7 @@ function App() {
         syncSession(nextSession);
         setStatus('ready');
       }, 500);
-      
+
     } catch (err) {
       console.error(err);
       setStatus('idle');
@@ -629,29 +629,29 @@ function App() {
       });
 
       const data = await response.json();
-      
+
       // Handle Failure State - No context / ambiguous query
       if (data.answer.toLowerCase().includes("i don't know") || data.answer.toLowerCase().includes("does not contain")) {
-        setMessages(prev => [...prev, { 
-          role: 'assistant', 
-          text: "The document does not contain definitive information regarding this query. Ensure the topic is covered in the provided text, or try using alternate phrasing.", 
+        setMessages(prev => [...prev, {
+          role: 'assistant',
+          text: "The document does not contain definitive information regarding this query. Ensure the topic is covered in the provided text, or try using alternate phrasing.",
           sources: [],
           cached: data.cached,
           isFailure: true,
           originalQuery: userQuery
         }]);
       } else {
-        setMessages(prev => [...prev, { 
-          role: 'assistant', 
-          text: data.answer, 
+        setMessages(prev => [...prev, {
+          role: 'assistant',
+          text: data.answer,
           sources: data.sources,
           cached: data.cached,
           originalQuery: userQuery
         }]);
       }
     } catch (err) {
-      setMessages(prev => [...prev, { 
-        role: 'assistant', 
+      setMessages(prev => [...prev, {
+        role: 'assistant',
         text: 'The system encountered an error connecting to the retrieval pipeline. Please ensure the backend service is operational.',
         isFailure: true,
         originalQuery: userQuery
@@ -702,14 +702,28 @@ function App() {
       if (!response.ok) throw new Error('Artifact download unavailable');
 
       const blob = await response.blob();
-      const objectUrl = window.URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
-      anchor.href = objectUrl;
-      anchor.download = buildArtifactFilename(session.id);
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      window.URL.revokeObjectURL(objectUrl);
+
+      const contentDisposition = response.headers.get("Content-Disposition");
+
+      let filename = "metadata.json";
+
+      if (contentDisposition && contentDisposition.includes("filename=")) {
+        filename = contentDisposition
+          .split("filename=")[1]
+          .replace(/"/g, "");
+      }
+
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+
+      a.href = url;
+      a.download = filename;
+
+      document.body.appendChild(a);
+      a.click();
+
+      a.remove();
+      window.URL.revokeObjectURL(url);
     } catch (err) {
       console.error(err);
       alert('Failed to download the knowledge artifact. Please try again.');
@@ -722,7 +736,7 @@ function App() {
     "What core methodology is proposed?",
     "Summarize the conclusion..."
   ], []);
-  
+
   const [phIndex, setPhIndex] = useState(0);
 
   useEffect(() => {
@@ -734,14 +748,14 @@ function App() {
 
   return (
     <div className="container" style={{ position: 'relative', paddingBottom: '8rem' }}>
-      
+
       {/* Editorial Header */}
       <header className="animate-fade-in" style={{ marginBottom: '4rem', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
         <div>
           <h1 style={{ marginBottom: '0.25rem' }}>liteRAG.</h1>
           <p className="mono-text" style={{ color: 'var(--text-muted)' }}>RESEARCH ENGINE PIPELINE</p>
         </div>
-        
+
         {/* Session Context */}
         {session.documentName && (
           <div style={{ textAlign: 'right', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '0.25rem' }}>
@@ -782,10 +796,10 @@ function App() {
       {/* Upload State */}
       {(status === 'idle' || status === 'uploading') && (
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: '100%' }}>
-          <div 
-            className={`file-dropzone animate-fade-in ${status === 'uploading' ? 'pulse-border' : ''} ${isDragging ? 'dragging' : ''}`} 
-            style={{ 
-              padding: '4rem 3rem', 
+          <div
+            className={`file-dropzone animate-fade-in ${status === 'uploading' ? 'pulse-border' : ''} ${isDragging ? 'dragging' : ''}`}
+            style={{
+              padding: '4rem 3rem',
               borderRadius: 'var(--radius-sm)',
               width: '100%',
               maxWidth: '600px',
@@ -796,7 +810,7 @@ function App() {
             onDrop={handleDrop}
           >
             <input type="file" id="pdf-upload" accept=".pdf" onChange={handleUpload} style={{ display: 'none' }} disabled={status === 'uploading'} />
-            
+
             <label htmlFor="pdf-upload" style={{ cursor: status === 'uploading' ? 'default' : 'pointer', display: 'block', width: '100%', margin: 0 }}>
               {status === 'idle' ? (
                 <div style={{ textAlign: 'center' }}>
@@ -813,57 +827,57 @@ function App() {
                     <span className="btn-primary">Select PDF to Analyze</span>
                   </div>
                 </div>
-            ) : (
-              <div style={{ maxWidth: '400px', margin: '0 auto' }}>
-                <h2 style={{ marginBottom: '2rem', textAlign: 'center' }}>Processing...</h2>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                  {uploadStages.map((stage, i) => (
-                    <div key={i} className="animate-fade-in" style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                      {stage.isDone ? (
-                        <CheckCircle2 size={18} color="var(--success)" />
-                      ) : stage.isCurrent ? (
-                        <MemoizedSpinner size={18} color="var(--accent)" />
-                      ) : (
-                        <div style={{ width: '18px', height: '18px', border: '1px solid var(--border)', borderRadius: '50%' }} />
-                      )}
-                      <span className="mono-text" style={{ 
-                        color: stage.isCurrent ? 'var(--text-primary)' : (stage.isDone ? 'var(--text-secondary)' : 'var(--text-muted)'),
-                        opacity: stage.isDone ? 0.7 : 1
-                      }}>
-                        {stage.msg}
-                      </span>
-                    </div>
-                  ))}
+              ) : (
+                <div style={{ maxWidth: '400px', margin: '0 auto' }}>
+                  <h2 style={{ marginBottom: '2rem', textAlign: 'center' }}>Processing...</h2>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                    {uploadStages.map((stage, i) => (
+                      <div key={i} className="animate-fade-in" style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                        {stage.isDone ? (
+                          <CheckCircle2 size={18} color="var(--success)" />
+                        ) : stage.isCurrent ? (
+                          <MemoizedSpinner size={18} color="var(--accent)" />
+                        ) : (
+                          <div style={{ width: '18px', height: '18px', border: '1px solid var(--border)', borderRadius: '50%' }} />
+                        )}
+                        <span className="mono-text" style={{
+                          color: stage.isCurrent ? 'var(--text-primary)' : (stage.isDone ? 'var(--text-secondary)' : 'var(--text-muted)'),
+                          opacity: stage.isDone ? 0.7 : 1
+                        }}>
+                          {stage.msg}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-              </div>
-            )}
-          </label>
-        </div>
-
-        {(status === 'idle' || status === 'uploading') && (
-          <div className="animate-fade-in" style={{ marginTop: '4rem', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '2rem' }}>
-            <div className="system-pipeline" style={{ display: 'flex', alignItems: 'center', gap: '1rem', fontSize: '0.85rem', fontFamily: 'var(--font-mono)', letterSpacing: '0.05em', fontWeight: 500 }}>
-              <span className={`pipeline-step ${uploadStages.find(s => s.msg === 'Extracting...' && s.isCurrent) ? 'active' : ''} ${uploadStages.find(s => s.msg === 'Extracting...' && s.isDone) ? 'done' : ''}`}>EXTRACT</span>
-              <ChevronRight size={14} className="pipeline-chevron" />
-              <span className={`pipeline-step ${uploadStages.find(s => s.msg === 'Chunking...' && s.isCurrent) ? 'active' : ''} ${uploadStages.find(s => s.msg === 'Chunking...' && s.isDone) ? 'done' : ''}`}>CHUNK</span>
-              <ChevronRight size={14} className="pipeline-chevron" />
-              <span className={`pipeline-step ${uploadStages.find(s => (s.msg === 'Embedding...' || s.msg === 'Indexing...') && s.isCurrent) ? 'active' : ''} ${uploadStages.find(s => s.msg === 'Indexing...' && s.isDone) ? 'done' : ''}`}>EMBED</span>
-              <ChevronRight size={14} className="pipeline-chevron" />
-              <span className="pipeline-step">QUERY</span>
-            </div>
-            
-            <div style={{ display: 'flex', alignItems: 'center', gap: '2rem', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-              <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <CheckCircle2 size={16} color="var(--success)" /> Processed locally
-              </span>
-              <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <CheckCircle2 size={16} color="var(--success)" /> No external storage
-              </span>
-            </div>
+              )}
+            </label>
           </div>
-        )}
-      </div>
-    )}
+
+          {(status === 'idle' || status === 'uploading') && (
+            <div className="animate-fade-in" style={{ marginTop: '4rem', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '2rem' }}>
+              <div className="system-pipeline" style={{ display: 'flex', alignItems: 'center', gap: '1rem', fontSize: '0.85rem', fontFamily: 'var(--font-mono)', letterSpacing: '0.05em', fontWeight: 500 }}>
+                <span className={`pipeline-step ${uploadStages.find(s => s.msg === 'Extracting...' && s.isCurrent) ? 'active' : ''} ${uploadStages.find(s => s.msg === 'Extracting...' && s.isDone) ? 'done' : ''}`}>EXTRACT</span>
+                <ChevronRight size={14} className="pipeline-chevron" />
+                <span className={`pipeline-step ${uploadStages.find(s => s.msg === 'Chunking...' && s.isCurrent) ? 'active' : ''} ${uploadStages.find(s => s.msg === 'Chunking...' && s.isDone) ? 'done' : ''}`}>CHUNK</span>
+                <ChevronRight size={14} className="pipeline-chevron" />
+                <span className={`pipeline-step ${uploadStages.find(s => (s.msg === 'Embedding...' || s.msg === 'Indexing...') && s.isCurrent) ? 'active' : ''} ${uploadStages.find(s => s.msg === 'Indexing...' && s.isDone) ? 'done' : ''}`}>EMBED</span>
+                <ChevronRight size={14} className="pipeline-chevron" />
+                <span className="pipeline-step">QUERY</span>
+              </div>
+
+              <div style={{ display: 'flex', alignItems: 'center', gap: '2rem', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+                <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <CheckCircle2 size={16} color="var(--success)" /> Processed locally
+                </span>
+                <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <CheckCircle2 size={16} color="var(--success)" /> No external storage
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Research Transcript State */}
       {status === 'ready' && (
@@ -884,7 +898,7 @@ function App() {
           ) : (
             <div className="messages" style={{ paddingBottom: '2rem' }}>
               {messages.map((msg, i) => <TranscriptItem key={i} message={msg} />)}
-              
+
               {isQuerying && (
                 <div className="animate-fade-in" style={{ marginLeft: '2rem', display: 'flex', alignItems: 'center', gap: '0.75rem', color: 'var(--accent)', marginTop: '2rem' }}>
                   <MemoizedSpinner size={16} />
@@ -919,8 +933,8 @@ function App() {
                 onChange={(e) => setQuery(e.target.value)}
                 autoFocus
               />
-              <button 
-                type="submit" 
+              <button
+                type="submit"
                 disabled={!query.trim() || isQuerying}
                 style={{
                   position: 'absolute',
