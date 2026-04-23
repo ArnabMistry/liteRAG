@@ -26,6 +26,7 @@ from app.cache import QueryCache
 from app.generation import AnswerGenerator
 from app.query_processing import QueryProcessor
 from app.logging_utils import log_event
+from app.hybrid_ingestion import process_documents as hybrid_process_documents, write_v2_artifact
 
 app = FastAPI(title="liteRAG API")
 
@@ -431,7 +432,25 @@ async def upload_pdf(file: UploadFile = File(...)):
         cache.clear()
     except Exception as exc:
         raise HTTPException(status_code=500, detail="Failed to clear query cache.") from exc
-    
+
+    # --- V2 Hybrid Ingestion (non-blocking enrichment) ---
+    # Reuses the SAME docs list from PDFIngestor above — identical source text.
+    # Any v2 failure is isolated: logged and skipped, v1 response is unaffected.
+    try:
+        print(f"[{file_id}] Stage: Building v2 knowledge artifact...")
+        v2_artifact = hybrid_process_documents(
+            documents=docs,
+            pdf_path=str(file_path),   # pdfplumber table enrichment only
+            file_id=file_id,           # correlate with v1 artifact
+        )
+        write_v2_artifact(v2_artifact)
+        log_event("upload_v2_indexed", file_id=file_id,
+                  sections=v2_artifact["stats"]["total_sections"],
+                  tables=v2_artifact["stats"]["total_tables"])
+    except Exception as exc:
+        print(f"[{file_id}] WARNING: v2 ingestion failed (non-fatal): {exc}")
+        log_event("upload_v2_failed", file_id=file_id, error=str(exc))
+
     return {"message": "PDF processed and indexed successfully", "file_id": file_id, "pages": len(docs)}
 
 @app.post("/query")

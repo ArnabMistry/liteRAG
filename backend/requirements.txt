@@ -9,3 +9,7 @@ numpy
 pydantic
 pytest
 python-dotenv
+pdfplumber
+langdetect
+transformers
+torch
